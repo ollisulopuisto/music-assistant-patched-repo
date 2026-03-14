@@ -1,0 +1,32 @@
+name: "Music Assistant (Patched)"
+version: "latest"
+slug: "music_assistant_patched"
+description: "Music Assistant with Variable Playback Speed support (Patched)"
+url: "https://github.com/dst/music-assistant-patched-repo"
+arch:
+  - aarch64
+  - amd64
+image: "ghcr.io/dst/music-assistant-server"
+init: false
+map:
+  - config:rw
+  - share:rw
+  - ssl:ro
+  - media:rw
+options:
+  log_level: info
+schema:
+  log_level: list(none|fatal|error|warning|info|debug|vdebug)?
+ingress: true
+ingress_port: 8095
+panel_icon: mdi:music-circle
+panel_title: Music Assistant
+devices:
+  - /dev/snd:/dev/snd:rw
+cap_add:
+  - SYS_NICE
+  - SYS_RESOURCE
+network: host
+privileged:
+  - SYS_ADMIN
+  - NET_ADMIN
