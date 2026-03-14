@@ -2,11 +2,11 @@ name: "Music Assistant (Patched)"
 version: "latest"
 slug: "music_assistant_patched"
 description: "Music Assistant with Variable Playback Speed support (Patched)"
-url: "https://github.com/dst/music-assistant-patched-repo"
+url: "https://github.com/ollisulopuisto/music-assistant-patched-repo"
 arch:
   - aarch64
   - amd64
-image: "ghcr.io/dst/music-assistant-server"
+image: "ghcr.io/ollisulopuisto/music-assistant-server"
 init: false
 map:
   - config:rw
