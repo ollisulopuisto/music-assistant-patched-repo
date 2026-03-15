@@ -1,20 +1,9 @@
-From 9eb2fcdd3f1cba28ef202da188ff2701077a6639 Mon Sep 17 00:00:00 2001
-From: Olli Sulopuisto <dst@iki.fi>
-Date: Tue, 10 Mar 2026 21:10:27 +0200
-Subject: [PATCH] Add variable playback speed support
-
----
- music_assistant/constants.py                 | 26 +++++++++++++++++++-
- music_assistant/controllers/player_queues.py | 14 ++++++++---
- music_assistant/helpers/ffmpeg.py            | 17 +++++++++++++
- 3 files changed, 53 insertions(+), 4 deletions(-)
-
 diff --git a/music_assistant/constants.py b/music_assistant/constants.py
-index eb0d7914..73287e5f 100644
+index 906d415..3d53343 100644
 --- a/music_assistant/constants.py
 +++ b/music_assistant/constants.py
-@@ -237,7 +237,31 @@ CONF_ENTRY_LOG_LEVEL = ConfigEntry(
-     requires_reload=False,  # applied dynamically via _set_logger()
+@@ -164,7 +164,30 @@ CONF_ENTRY_LOG_LEVEL = ConfigEntry(
+     category="advanced",
  )
  
 -DEFAULT_PROVIDER_CONFIG_ENTRIES = (CONF_ENTRY_LOG_LEVEL,)
@@ -35,8 +24,7 @@ index eb0d7914..73287e5f 100644
 +        ConfigValueOption("2x", "2.0"),
 +    ],
 +    default_value="1.0",
-+    advanced=True,
-+    requires_reload=False,
++    category="advanced",
 +)
 +
 +DEFAULT_PROVIDER_CONFIG_ENTRIES = (
@@ -47,50 +35,76 @@ index eb0d7914..73287e5f 100644
  
  # some reusable player config entries
 diff --git a/music_assistant/controllers/player_queues.py b/music_assistant/controllers/player_queues.py
-index cf2d9746..cd84a064 100644
+index d468482..f10ca37 100644
 --- a/music_assistant/controllers/player_queues.py
 +++ b/music_assistant/controllers/player_queues.py
-@@ -73,6 +73,7 @@ from music_assistant.constants import (
-     PLAYBACK_REPORT_INTERVAL_SECONDS,
-     PLAYLIST_MEDIA_TYPES,
-     VERBOSE_LOG_LEVEL,
+@@ -65,6 +65,7 @@ from music_assistant_models.queue_item import QueueItem
+ from music_assistant.constants import (
+     ATTR_ANNOUNCEMENT_IN_PROGRESS,
+     CONF_FLOW_MODE,
 +    CONF_PLAYBACK_SPEED,
-     PlaylistPlayableItem,
+     MASS_LOGO_ONLINE,
+     VERBOSE_LOG_LEVEL,
  )
- from music_assistant.controllers.players.controller import IN_QUEUE_COMMAND
-@@ -443,10 +444,10 @@ class PlayerQueuesController(CoreController):
-         the speed will be set for the current item in the queue.
+@@ -695,6 +696,39 @@ class PlayerQueuesController(CoreController):
+         # player is not paused, perform resume instead
+         await self.resume(queue_id)
  
-         :param queue_id: queue_id of the queue to configure.
--        :param speed: playback speed multiplier (0.5 to 2.0). 1.0 = normal speed.
++    @api_command("player_queues/set_playback_speed")
++    async def set_playback_speed(
++        self, queue_id: str, speed: float, queue_item_id: str | None = None
++    ) -> None:
++        """
++        Set the playback speed for the given queue item.
++
++        If queue_item_id is not provided,
++        the speed will be set for the current item in the queue.
++
++        :param queue_id: queue_id of the queue to configure.
 +        :param speed: playback speed multiplier (0.2 to 3.0). 1.0 = normal speed.
-         """
--        if not (0.5 <= speed <= 2.0):
--            raise InvalidDataError(f"Playback speed must be between 0.5 and 2.0, got {speed}")
++        """
 +        if not (0.2 <= speed <= 3.0):
 +            raise InvalidDataError(f"Playback speed must be between 0.2 and 3.0, got {speed}")
-         queue = self._queues[queue_id]
-         if not queue.current_item:
-             raise QueueEmpty("Cannot set playback speed: queue is empty")
-@@ -1110,6 +1111,13 @@ class PlayerQueuesController(CoreController):
-                     seek_position=seek_position if attempt == 0 else 0,
-                     fade_in=fade_in if attempt == 0 else False,
-                 )
-+                # handle default playback speed from provider
-+                if queue_item.extra_attributes.get("playback_speed") is None:
-+                    if provider := self.mass.get_provider(queue_item.media_item.provider):
-+                        default_speed = provider.config.get_value(CONF_PLAYBACK_SPEED)
-+                        if default_speed and default_speed != "1.0":
-+                            queue_item.extra_attributes["playback_speed"] = float(default_speed)
++        queue = self._queues[queue_id]
++        if not queue.current_item:
++            raise QueueEmpty("Cannot set playback speed: queue is empty")
++        queue_item_id = queue_item_id or queue.current_item.queue_item_id
++        queue_item = self.get_item(queue_id, queue_item_id)
++        if not queue_item:
++            raise InvalidDataError(f"Queue item {queue_item_id} not found in queue")
++        if not queue_item.duration or queue_item.media_type == MediaType.RADIO:
++            raise InvalidCommand("Cannot set playback speed for items with unknown duration")
++        current_speed = float(queue_item.extra_attributes.get("playback_speed") or 1.0)
++        if abs(current_speed - speed) < 0.001:
++            return  # no change
++        # use extra_attributes of the queue item to store the playback speed
++        queue_item.extra_attributes["playback_speed"] = speed
++        self.signal_update(queue_id)
++        if queue.state == PlaybackState.PLAYING:
++            await self.resume(queue_id)
 +
-                 # if we reach this point, loading the item succeeded, break the loop
-                 queue.current_index = index
-                 queue.current_item = queue_item
+     @api_command("player_queues/pause")
+     async def pause(self, queue_id: str) -> None:
+         """Handle PAUSE command for given queue.
+@@ -931,6 +965,13 @@ class PlayerQueuesController(CoreController):
+                         seek_position=seek_position if attempt == 0 else 0,
+                         fade_in=fade_in if attempt == 0 else False,
+                     )
++                    # handle default playback speed from provider
++                    if queue_item.extra_attributes.get("playback_speed") is None:
++                        if provider := self.mass.get_provider(queue_item.media_item.provider):
++                            default_speed = provider.config.get_value(CONF_PLAYBACK_SPEED)
++                            if default_speed and default_speed != "1.0":
++                                queue_item.extra_attributes["playback_speed"] = float(default_speed)
++
+                     # if we reach this point, loading the item succeeded, break the loop
+                     queue.current_index = index
+                     queue.current_item = queue_item
 diff --git a/music_assistant/helpers/ffmpeg.py b/music_assistant/helpers/ffmpeg.py
-index f886e576..515442cc 100644
+index 9ea5ea0..0a30a72 100644
 --- a/music_assistant/helpers/ffmpeg.py
 +++ b/music_assistant/helpers/ffmpeg.py
-@@ -394,6 +394,23 @@ def get_ffmpeg_args(  # noqa: PLR0915
+@@ -380,6 +380,23 @@ def get_ffmpeg_args(  # noqa: PLR0915
              *filter_params,
          ]
  
@@ -114,6 +128,3 @@ index f886e576..515442cc 100644
      # determine if we need to do resampling (or dithering)
      if input_format.sample_rate != output_format.sample_rate or (
          input_format.bit_depth > 16 and output_format.bit_depth == 16
--- 
-2.39.5 (Apple Git-154)
-
