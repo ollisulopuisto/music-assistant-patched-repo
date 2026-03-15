@@ -1,6 +1,9 @@
 name: Build Patched Music Assistant
 
 on:
+  push:
+    branches:
+      - main
   schedule:
     - cron: '0 0 * * *' # Check daily at midnight
   workflow_dispatch:   # Allow manual trigger

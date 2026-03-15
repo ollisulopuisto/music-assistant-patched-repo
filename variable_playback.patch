@@ -123,8 +123,33 @@ index 9ea5ea0..0a30a72 100644
 +            while speed > 2.0:
 +                filter_params.append("atempo=2.0")
 +                speed /= 2.0
-+            filter_params.append(f"atempo={speed}")
+filter_params.append(f"atempo={speed}")
+
+# determine if we need to do resampling (or dithering)
+if input_format.sample_rate != output_format.sample_rate or (
+input_format.bit_depth > 16 and output_format.bit_depth == 16
+diff --git a/music_assistant/providers/hass/__init__.py b/music_assistant/providers/hass/__init__.py
+index 828c91b..9016f33 100644
+--- a/music_assistant/providers/hass/__init__.py
++++ b/music_assistant/providers/hass/__init__.py
+@@ -321,7 +321,9 @@ class HomeAssistantProvider(PluginProvider):
+"""Handle async initialization of the plugin."""
+self._player_controls = {}
+url = get_websocket_url(self.config.get_value(CONF_URL))
+-        token = self.config.get_value(CONF_AUTH_TOKEN)
++        # Use HASSIO_TOKEN when running as addon (token config is None)
++        token = self.config.get_value(CONF_AUTH_TOKEN) or os.environ.get("SUPERVISOR_TOKEN") or os.environ.get("HASSIO_TOKEN")
 +
-     # determine if we need to do resampling (or dithering)
-     if input_format.sample_rate != output_format.sample_rate or (
-         input_format.bit_depth > 16 and output_format.bit_depth == 16
+logging.getLogger("hass_client").setLevel(self.logger.level + 10)
+ssl = bool(self.config.get_value(CONF_VERIFY_SSL))
+http_session = self.mass.http_session if ssl else self.mass.http_session_no_ssl
+@@ -594,7 +596,7 @@ class HomeAssistantProvider(PluginProvider):
+ url = f"{ha_url}{path}"
+
+# Use HASSIO_TOKEN when running as addon (token config is None)
+-        token = self.config.get_value(CONF_AUTH_TOKEN) or os.environ.get("HASSIO_TOKEN")
++        token = self.config.get_value(CONF_AUTH_TOKEN) or os.environ.get("SUPERVISOR_TOKEN") or os.environ.get("HASSIO_TOKEN")
+headers = {"Authorization": f"Bearer {token}"} if token else {}
+
+ssl = bool(self.config.get_value(CONF_VERIFY_SSL))
+
