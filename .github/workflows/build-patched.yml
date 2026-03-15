@@ -42,14 +42,16 @@ jobs:
       - name: Modify Dockerfile to build from source
         working-directory: upstream
         run: |
-          # The official Dockerfile expects wheels in dist/
-          # We'll change it to install from source since we just patched it.
+          # Remove the ADD dist dist line
+          sed -i 's/^ADD dist dist/# ADD dist dist/' Dockerfile
           
-          # Replace the wheel install with source install
-          sed -i '/ARG MASS_VERSION/,/music-assistant@dist/c\COPY . /app/source\nRUN uv pip install /app/source' Dockerfile
+          # Replace the prebuilt wheel install with source install
+          # We use a marker to find the right place and replace the entire section
+          sed -i '/# Install Music Assistant from prebuilt wheel/,/whl"/c\# Install Music Assistant from source\nCOPY . /app/source\nRUN uv pip install /app/source' Dockerfile
           
-          # Remove the bytecode compilation of the wheel path and point to the new site-packages
-          sed -i 's|music_assistant$||' Dockerfile
+          # Fix the bytecode compilation path - it should still work if music_assistant is in site-packages
+          # But let's make sure it doesn't fail if the path is slightly different
+          sed -i 's|/site-packages/music_assistant|/site-packages|' Dockerfile
 
       - name: Log in to GHCR
         uses: docker/login-action@v3
