@@ -33,6 +33,7 @@ jobs:
           repository: music-assistant/server
           ref: ${{ steps.upstream.outputs.tag }}
           path: upstream
+          fetch-depth: 0
 
       - name: Checkout this repo (for the patch)
         uses: actions/checkout@v4
@@ -42,7 +43,10 @@ jobs:
       - name: Apply Patch
         working-directory: upstream
         run: |
-          git apply ../patch-repo/variable_playback.patch
+          git config --global user.email "action@github.com"
+          git config --global user.name "GitHub Action"
+          git fetch --tags
+          git apply --3way --ignore-whitespace ../patch-repo/variable_playback.patch
 
       - name: Modify Dockerfile to build from source
         working-directory: upstream
