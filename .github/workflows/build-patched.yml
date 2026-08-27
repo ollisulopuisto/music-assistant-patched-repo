@@ -210,9 +210,59 @@ jobs:
           path: frontend-dist/*.whl
           retention-days: 1
 
+  verify:
+    name: Test the patched tree
+    needs: resolve
+    if: needs.resolve.outputs.changed == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Check out the upstream server release
+        uses: actions/checkout@v5
+        with:
+          repository: music-assistant/server
+          ref: ${{ needs.resolve.outputs.server_ref }}
+          path: source
+
+      - name: Apply the server patches
+        working-directory: source
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          for patch in ../patches/server/*.patch; do
+            echo "::group::$(basename "$patch")"
+            git apply --verbose "$patch"
+            echo "::endgroup::"
+          done
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version-file: source/.python-version
+
+      - name: Install
+        working-directory: source
+        run: |
+          set -euo pipefail
+          # upstream's own recipe (see its .github/workflows/test.yml): requirements_all
+          # carries the --extra-index-url that resolves torch to the small CPU wheel,
+          # which pyproject's bare pin would otherwise turn into a multi-gigabyte one
+          pip install uv
+          uv pip install --system --index-strategy unsafe-best-match \
+            . .[test] -r requirements_all.txt
+
+      - name: Run the provider's tests
+        working-directory: source
+        run: |
+          set -euo pipefail
+          # a patch can apply cleanly to a refactored provider and still be wrong for it;
+          # publishing an image whose provider is quietly broken is worse than publishing
+          # nothing. Architecture-independent, so this runs once rather than per-arch.
+          python -m pytest tests/providers/pocketcasts -q
+
   build:
     name: Build ${{ matrix.arch }}
-    needs: [resolve, frontend]
+    needs: [resolve, frontend, verify]
     if: needs.resolve.outputs.changed == 'true'
     runs-on: ${{ matrix.runner }}
     strategy:
@@ -249,16 +299,6 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version-file: source/.python-version
-
-      - name: Run the provider's tests against the patched tree
-        working-directory: source
-        run: |
-          set -euo pipefail
-          # a patch can apply cleanly and still be wrong for this release: publishing an
-          # image whose provider is broken is worse than publishing nothing at all
-          python -m pip install --upgrade pip
-          pip install -e ".[test]"
-          python -m pytest tests/providers/pocketcasts -q
 
       - uses: actions/download-artifact@v4
         with:
