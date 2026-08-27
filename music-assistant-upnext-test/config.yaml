@@ -1,5 +1,5 @@
 name: "Music Assistant (Up Next test)"
-version: "0.0.1.dev1"
+version: "0.0.2"
 slug: "music_assistant_upnext_test"
 description: "Pocket Casts Up Next playlist test build - throwaway, runs its own empty library"
 url: "https://github.com/ollisulopuisto/ma-server/pull/1"
@@ -26,7 +26,13 @@ devices:
 cap_add:
   - SYS_NICE
   - SYS_RESOURCE
-network: host
+# host_network is the key that actually shares the host's network stack. "network: host" is
+# not that - "network" maps ports - so the container kept a 172.30.32.0/23 Supervisor address
+# and handed Cast devices a stream URL they cannot route to.
+host_network: true
+# the Home Assistant provider authenticates through the Supervisor, which needs this grant;
+# without it setup fails with "Invalid access"
+homeassistant_api: true
 privileged:
   - SYS_ADMIN
   - NET_ADMIN
