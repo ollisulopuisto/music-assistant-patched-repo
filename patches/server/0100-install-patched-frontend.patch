@@ -1,0 +1,23 @@
+Install the patched frontend wheel over the pinned one
+
+music-assistant's own metadata pins music-assistant-frontend, so installing the
+server wheel pulls that exact version from PyPI and would overwrite the wheel we
+built from patched source. Reinstalling ours afterwards, without deps so nothing
+else moves, is the last word.
+
+--- a/Dockerfile
++++ b/Dockerfile
+@@ -89,6 +89,12 @@ ARG MASS_VERSION
+ RUN uv pip install \
+     --no-cache \
+     "music-assistant@dist/music_assistant-${MASS_VERSION}-py3-none-any.whl"
+ 
++# The line above resolves music-assistant's pinned frontend from PyPI; this puts
++# the locally built, patched one back. --no-deps so only the frontend moves.
++RUN uv pip install \
++    --no-cache --force-reinstall --no-deps \
++    dist/music_assistant_frontend-*.whl
++
+ COPY --from=cliairplay /cliairplay /tmp/cliairplay
+ RUN SITE_PACKAGES="$("$VIRTUAL_ENV/bin/python" -c \
+         'import sysconfig; print(sysconfig.get_path("purelib"))')" \

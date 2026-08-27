@@ -1,0 +1,99 @@
+From 7932f65917222adcfb08faa4f1504eac7659ba87 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 27 Aug 2026 19:29:32 +0000
+Subject: [PATCH] Give the browse folders their episodes' show notes
+
+An episode reached through Up Next, History, Starred or New Releases came back
+with no description, while the same episode reached through its own podcast
+carried one. The mixed folders passed show_notes=None because show notes are
+served per podcast and a mixed folder does not know its podcasts up front.
+
+It knows them by the time the episodes are resolved, though, so look them up
+there - once per distinct podcast, alongside the name lookup that already
+works this way. The fetch behind it is cached for a day and a library sync
+fills that cache, so a folder of already-synced podcasts costs nothing.
+---
+ .../providers/pocketcasts/__init__.py         | 12 +++++-
+ .../providers/pocketcasts/test_pocketcasts.py | 39 +++++++++++++++++++
+ 2 files changed, 49 insertions(+), 2 deletions(-)
+
+diff --git a/music_assistant/providers/pocketcasts/__init__.py b/music_assistant/providers/pocketcasts/__init__.py
+index 62f9713..3d0b59e 100644
+--- a/music_assistant/providers/pocketcasts/__init__.py
++++ b/music_assistant/providers/pocketcasts/__init__.py
+@@ -735,15 +735,23 @@ class PocketCastsProvider(MusicProvider):
+         # every remaining name costs a full-podcast fetch, so look them up once per podcast and
+         # all at once: serialising them would stall the browse for as long as the folder is deep
+         missing = list({uuid for _, uuid, name in resolved if not name})
+-        looked_up = await asyncio.gather(*(self._get_podcast_name(uuid) for uuid in missing))
++        # show notes are served per podcast rather than per episode, so one lookup covers every
++        # episode a podcast contributed to this folder. The fetch behind it is cached for a day
++        # and a library sync of the same podcast fills that cache, so this is usually free
++        notes_uuids = list({uuid for _, uuid, _ in resolved})
++        looked_up, fetched_notes = await asyncio.gather(
++            asyncio.gather(*(self._get_podcast_name(uuid) for uuid in missing)),
++            asyncio.gather(*(self._get_show_notes(uuid) for uuid in notes_uuids)),
++        )
+         names = dict(zip(missing, looked_up, strict=True))
++        notes = dict(zip(notes_uuids, fetched_notes, strict=True))
+ 
+         items: list[PodcastEpisode] = []
+         for episode_data, podcast_uuid, podcast_name in resolved:
+             if episode_item := self._convert_episode(
+                 episode_data,
+                 podcast_uuid,
+-                show_notes=None,
++                show_notes=notes.get(podcast_uuid, {}).get(episode_data.get("uuid", "")),
+                 podcast_name=podcast_name or names.get(podcast_uuid, ""),
+             ):
+                 # these endpoints carry the playback status inline, so no extra lookup is needed
+diff --git a/tests/providers/pocketcasts/test_pocketcasts.py b/tests/providers/pocketcasts/test_pocketcasts.py
+index 1a3eef1..6c80eab 100644
+--- a/tests/providers/pocketcasts/test_pocketcasts.py
++++ b/tests/providers/pocketcasts/test_pocketcasts.py
+@@ -565,3 +565,42 @@ async def test_pressing_play_reads_the_live_resume_position(
+     )
+ 
+     assert (fully_played, position_ms) == (False, 120000)
++
++
++async def test_special_folder_episodes_carry_their_show_notes(
++    provider: PocketCastsProvider, client: AsyncMock
++) -> None:
++    """An episode reached through a mixed folder describes itself, as a feed episode does."""
++    client.get_show_notes.return_value = {"episode-1": {"description": "What this one is about"}}
++    client.get_starred_episodes.return_value = [
++        {
++            "uuid": "episode-1",
++            "title": "Episode 1",
++            "url": "https://example.com/ep1.mp3",
++            "podcast": {"uuid": "podcast-1", "title": "Podcast One"},
++        }
++    ]
++
++    items = await provider.browse("pocketcasts://starred")
++
++    episodes = [item for item in items if isinstance(item, PodcastEpisode)]
++    assert [episode.metadata.description for episode in episodes] == ["What this one is about"]
++
++
++async def test_special_folder_reads_show_notes_once_per_podcast(
++    provider: PocketCastsProvider, client: AsyncMock
++) -> None:
++    """Show notes come per podcast, so a folder deep in one podcast must not ask repeatedly."""
++    client.get_history.return_value = [
++        {
++            "uuid": f"episode-{index}",
++            "title": f"Episode {index}",
++            "url": f"https://example.com/ep{index}.mp3",
++            "podcast": {"uuid": "podcast-1", "title": "Podcast One"},
++        }
++        for index in (1, 2, 3)
++    ]
++
++    await provider.browse("pocketcasts://history")
++
++    assert client.get_show_notes.await_count == 1
+-- 
+2.43.0
+
