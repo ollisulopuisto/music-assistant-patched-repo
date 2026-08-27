@@ -159,6 +159,10 @@ jobs:
           done
 
       - uses: pnpm/action-setup@v4
+        with:
+          # the pnpm version comes from the frontend's own packageManager field;
+          # this repository's root has no package.json for the action to read
+          package_json_file: frontend/package.json
       - uses: actions/setup-node@v6
         with:
           node-version: 22
