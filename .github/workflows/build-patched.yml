@@ -64,6 +64,7 @@ jobs:
     outputs:
       server_ref: ${{ steps.pick.outputs.server_ref }}
       version: ${{ steps.pick.outputs.version }}
+      wheel_version: ${{ steps.pick.outputs.wheel_version }}
       changed: ${{ steps.pick.outputs.changed }}
     steps:
       - uses: actions/checkout@v5
@@ -106,8 +107,13 @@ jobs:
             counter=$(( ${current##*.} + 1 ))
           fi
 
+          # Two spellings of the same version, because the two namespaces disagree:
+          # a Docker tag cannot contain '+', and PEP 440 will not accept '-upnext.1'.
+          # The Python one is a local version, which is precisely the notion of "this
+          # upstream release plus local modifications".
           echo "server_ref=$server_ref" >> "$GITHUB_OUTPUT"
-          echo "version=${base}.${counter}" >> "$GITHUB_OUTPUT"
+          echo "version=${server_ref}-upnext.${counter}" >> "$GITHUB_OUTPUT"
+          echo "wheel_version=${server_ref}+upnext.${counter}" >> "$GITHUB_OUTPUT"
           echo "changed=true" >> "$GITHUB_OUTPUT"
           echo "Building ${base}.${counter} from upstream $server_ref"
 
@@ -308,7 +314,7 @@ jobs:
       - name: Stamp the version and build the server wheel
         working-directory: source
         env:
-          VERSION: ${{ needs.resolve.outputs.version }}
+          VERSION: ${{ needs.resolve.outputs.wheel_version }}
         run: |
           set -euo pipefail
           python - <<'PY'
@@ -351,7 +357,7 @@ jobs:
           tags: ${{ env.IMAGE_NAME }}:${{ needs.resolve.outputs.version }}-${{ matrix.arch }}
           build-args: |
             BASE_IMAGE_VERSION=${{ env.BASE_IMAGE_VERSION }}
-            MASS_VERSION=${{ needs.resolve.outputs.version }}
+            MASS_VERSION=${{ needs.resolve.outputs.wheel_version }}
           cache-from: type=gha,scope=${{ matrix.arch }}
           cache-to: type=gha,mode=max,scope=${{ matrix.arch }}
 
