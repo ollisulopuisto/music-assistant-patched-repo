@@ -1,7 +1,11 @@
-# Music Assistant, patched
+# Patched Music Assistant add-ons
 
-A Home Assistant add-on repository serving Music Assistant **stable** with a set
-of Pocket Casts patches applied, rebuilt automatically as upstream releases.
+A Home Assistant add-on repository. It serves two add-ons:
+
+- **Music Assistant (Pocket Casts Up Next)** — Music Assistant **stable** with a set
+  of Pocket Casts patches applied, rebuilt automatically as upstream releases.
+- **Audiobookshelf** — upstream's own image, wrapped as an add-on. Nothing is
+  rebuilt; see [Audiobookshelf](#audiobookshelf) below.
 
 Add it to Home Assistant under **Settings → Add-ons → Add-on Store → ⋮ →
 Repositories**:
@@ -110,3 +114,36 @@ To fix: re-roll the failing patch against the release named in the run, and push
   for variable playback speed. That feature is in upstream now, so it is
   superseded; its nightly workflow has been removed. The folder is left in place
   so anyone still running it does not have the add-on vanish from their store.
+
+## Audiobookshelf
+
+A thin wrapper around upstream's published multi-architecture image
+(`ghcr.io/advplyr/audiobookshelf`). No build step — the add-on's `version` is
+simply the Audiobookshelf release it installs, so updating means bumping that
+line to a newer tag.
+
+**Why bother, when Music Assistant can read a filesystem directly?** Progress.
+Music Assistant's Audiobookshelf provider both reports position back
+(`on_played`) and subscribes to a socket that pushes changes the other way
+(`on_user_item_progress_updated`). Two Music Assistant instances pointed at one
+Audiobookshelf therefore share a single, live resume position. With a filesystem
+provider, position lives in each server's own `playlog` table and the two
+silently drift apart.
+
+It is also far kinder to a remote link: Music Assistant talks HTTP to
+Audiobookshelf, which survives Tailscale and a flaky connection in a way SMB
+does not.
+
+### Notes
+
+- It listens on **13378**. Deliberately a real port rather than ingress: the
+  point is for Music Assistant — including an instance somewhere else entirely —
+  to reach it, and ingress only ever serves a browser.
+- `CONFIG_PATH` and `METADATA_PATH` are pointed into `/data`, because that is the
+  only directory an add-on keeps. The image defaults them to `/config` and
+  `/metadata`, which would not survive a restart.
+- Add your library under `/media/...`; the add-on maps Home Assistant's `media`
+  and `share` directories.
+- It does **not** give Audiobookshelf access to storage that Home Assistant
+  cannot already see. A drive attached to some other machine still has to be
+  mounted — Settings → System → Storage, or passed through to the VM.
