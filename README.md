@@ -119,8 +119,14 @@ To fix: re-roll the failing patch against the release named in the run, and push
 
 A thin wrapper around upstream's published multi-architecture image
 (`ghcr.io/advplyr/audiobookshelf`). No build step — the add-on's `version` is
-simply the Audiobookshelf release it installs, so updating means bumping that
-line to a newer tag.
+simply the Audiobookshelf release it installs.
+
+`.github/workflows/track-audiobookshelf.yml` keeps it current: daily, it finds
+the newest strict `x.y.z` tag upstream, checks that tag actually serves **both**
+architectures, and only then bumps `config.yaml`. Bumping the file is what makes
+Home Assistant *offer* the update — the Supervisor never installs it by itself,
+so the decision is still yours, it just stops being one you have to remember to
+go looking for. A failure opens an issue and leaves the installed version alone.
 
 **Why bother, when Music Assistant can read a filesystem directly?** Progress.
 Music Assistant's Audiobookshelf provider both reports position back
