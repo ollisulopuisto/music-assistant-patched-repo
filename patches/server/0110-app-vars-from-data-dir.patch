@@ -1,0 +1,50 @@
+Look for a user-supplied app_vars.json in the add-on data directory
+
+A build that is not upstream's carries no build-time app_secrets.json, so every
+bundled credential resolves to "" and the providers needing one cannot even
+start their setup flow. Spotify's authenticates its mandatory "global" session
+with app_var("spotify_client_id") before it ever offers the developer-key step,
+so an empty value is a dead end rather than a degraded mode.
+
+app_vars.py already supports a plaintext local map for people running from
+source, but it looks under $HOME, which in a container is not persisted across
+updates. Checking the data directory too gives a place to put YOUR OWN
+credentials - a Spotify client id you registered, a Last.fm key of your own -
+that survives a rebuild.
+
+This adds no home for anybody else's keys that the file did not already have;
+it only makes the existing local-file path reachable from an add-on.
+
+diff --git a/music_assistant/helpers/app_vars.py b/music_assistant/helpers/app_vars.py
+index 4c5a389..11f9317 100644
+--- a/music_assistant/helpers/app_vars.py
++++ b/music_assistant/helpers/app_vars.py
+@@ -66,7 +66,12 @@ APP_VAR_NAMES = (
+ _DERIVATION_TAG = b"music-assistant/app-vars/v1"
+ 
+ _BUNDLED_FILE = "app_secrets.json"
+-_DEFAULT_LOCAL_FILE = Path.home() / ".musicassistant" / "app_vars.json"
++# $HOME is not persisted in a container, so an add-on's data directory is checked first.
++# Both are only consulted when the build carries no bundled secrets of its own.
++_LOCAL_FILE_CANDIDATES = (
++    Path("/data") / "app_vars.json",
++    Path.home() / ".musicassistant" / "app_vars.json",
++)
+ 
+ 
+ def app_var(name: str) -> str:
+@@ -113,8 +118,12 @@ def _bundled_text() -> str | None:
+ 
+ def _local_secrets() -> Mapping[str, str]:
+     path = os.environ.get("MASS_APP_VARS_FILE")
+-    target = Path(path) if path else _DEFAULT_LOCAL_FILE
+-    return _read_json_map(str(target))
++    if path:
++        return _read_json_map(path)
++    for candidate in _LOCAL_FILE_CANDIDATES:
++        if found := _read_json_map(str(candidate)):
++            return found
++    return {}
+ 
+ 
+ @cache
