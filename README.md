@@ -25,6 +25,49 @@ Every one of these is also open as a pull request upstream. **When one is merged
 delete its patch file and push** — the next build picks up the change from
 upstream instead, and the pipeline carries on unchanged.
 
+## Bundled credentials, and why Spotify needs a file
+
+Upstream injects shared API credentials into its own builds at release time, from a
+private repository. A build that is not upstream's does not get them, so
+`app_var()` returns an empty string for every provider that relies on one:
+
+```
+spotify  qobuz  tidal  apple_music  deezer  lastfm_scrobble
+lastfm_recommendations  theaudiodb  fanarttv  acoustid_lookup
+```
+
+For Spotify this is fatal rather than degraded. Its setup flow authenticates a
+mandatory "global" session with `app_var("spotify_client_id")` *before* it offers
+the developer-key step, so an empty value is a dead end - you never reach the
+place where you would enter your own.
+
+`patches/server/0110-app-vars-from-data-dir.patch` makes the server read
+`/data/app_vars.json`, so **your own** credentials can live beside the rest of the
+add-on data and survive rebuilds:
+
+```json
+{
+  "spotify_client_id": "a client id from your own Spotify app",
+  "lastfm_api_key": "your own Last.fm key",
+  "lastfm_api_secret": "your own Last.fm secret"
+}
+```
+
+Register the Spotify app yourself at developer.spotify.com with
+`https://music-assistant.io/callback` as a redirect URI. It uses PKCE, so it needs
+no client secret.
+
+Two things worth knowing. The file is read once per process (`_read_json_map` is
+cached), so **restart the add-on after editing it**. And it is plaintext, unlike
+`settings.json`, which is encrypted - so it rides along in backups as written. A
+Spotify client id is a public OAuth identifier and fine there; a Last.fm *secret*
+is better placed in the Last.fm provider's own settings field, which is encrypted.
+
+Do not put Music Assistant's own bundled keys in this file. They are shared
+community credentials, rate-limited across every user of the project, and get
+throttled or revoked when they are scraped - which breaks Music Assistant for
+everyone, not just whoever copied them.
+
 ## How the build works
 
 `.github/workflows/build-patched.yml`, weekly on Mondays plus manual dispatch,
