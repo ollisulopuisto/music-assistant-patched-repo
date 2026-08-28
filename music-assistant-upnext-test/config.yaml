@@ -1,5 +1,5 @@
 name: "Music Assistant (Pocket Casts Up Next)"
-version: "2.10.0-upnext.1"
+version: "2.10.0-upnext.2"
 slug: "music_assistant_upnext_test"
 description: "Music Assistant stable with the Pocket Casts Up Next patches applied"
 url: "https://github.com/ollisulopuisto/music-assistant-patched-repo"
