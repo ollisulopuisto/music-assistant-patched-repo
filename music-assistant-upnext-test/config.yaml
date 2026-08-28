@@ -8,31 +8,48 @@ arch:
   - amd64
 image: "ghcr.io/ollisulopuisto/ma-server-patched"
 init: false
-map:
-  - config:rw
-  - share:rw
-  - ssl:ro
-  - media:rw
-options:
-  log_level: info
-schema:
-  log_level: list(none|fatal|error|warning|info|debug|vdebug)?
+
+# Everything below mirrors the official Music Assistant add-on's own config, because
+# the server expects that exact environment. Only the identity above differs.
+# https://github.com/music-assistant/home-assistant-addon/blob/main/music_assistant/config.yaml
+
+# The server binds a SEPARATE site for ingress, on INGRESS_SERVER_PORT (8094), and only
+# that one performs the "sign in through Home Assistant" handshake. Pointed at the main
+# port (8095) instead, ingress reaches a server that wants an ordinary login, which shows
+# up as "Couldn't sign in through Home Assistant" the moment the instance has any users.
 ingress: true
-ingress_port: 8095
-panel_icon: mdi:playlist-music
-panel_title: Music Assistant
-devices:
-  - /dev/snd:/dev/snd:rw
-cap_add:
-  - SYS_NICE
-  - SYS_RESOURCE
+ingress_port: 8094
+# and the handshake itself needs the Home Assistant auth API, which this grants
+auth_api: true
+homeassistant_api: true
+# lets Home Assistant find this server and offer the integration for it
+discovery:
+  - music_assistant
+
 # host_network is the key that actually shares the host's network stack. "network: host" is
 # not that - "network" maps ports - so the container kept a 172.30.32.0/23 Supervisor address
 # and handed Cast devices a stream URL they cannot route to.
 host_network: true
-# the Home Assistant provider authenticates through the Supervisor, which needs this grant;
-# without it setup fails with "Invalid access"
-homeassistant_api: true
+audio: true
+apparmor: true
+tmpfs: true
 privileged:
   - SYS_ADMIN
-  - NET_ADMIN
+  - DAC_READ_SEARCH
+map:
+  - media:rw
+  - ssl:ro
+
+# the artwork cache is 1.4 GB and regenerates itself; there is no sense carrying it in
+# every daily backup
+backup_exclude:
+  - cache.db
+  - collage_images/*
+  - .cache/*
+
+panel_icon: mdi:playlist-music
+panel_title: Music Assistant
+options:
+  log_level: info
+schema:
+  log_level: list(none|fatal|error|warning|info|debug|vdebug)?
