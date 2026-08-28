@@ -1,4 +1,4 @@
-From b7899e62a3a9b1d21838f259adb667d036fc7818 Mon Sep 17 00:00:00 2001
+From a1de0ccddf460a34d8238b9b70065a6fdcf3c057 Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
 Date: Thu, 27 Aug 2026 21:17:37 +0000
 Subject: [PATCH] Show a podcast episode's show notes where lyrics go
@@ -20,19 +20,21 @@ that drives synced lyrics never starts for them. Notes render through
 MarkdownText, which sanitises the markup podcast feeds carry and sends its links
 to a new tab.
 ---
- src/components/ListviewItem.vue               |  10 +-
+ src/components/ListviewItem.vue               |  15 +-
+ src/helpers/utils.ts                          |  28 ++++
  .../default/PlayerOSD/PlayerFullscreen.vue    | 136 +++++++++++++-----
  .../PlayerFullscreenHeaderControls.vue        |  79 ++++++----
  .../default/PlayerOSD/useFullscreenQueue.ts   |  10 +-
  src/translations/en.json                      |   4 +
+ tests/helpers/markdown.test.ts                |  36 ++++-
  tests/layouts/PlayerFullscreen.test.ts        |  73 +++++++++-
- 6 files changed, 239 insertions(+), 73 deletions(-)
+ 8 files changed, 306 insertions(+), 75 deletions(-)
 
 diff --git a/src/components/ListviewItem.vue b/src/components/ListviewItem.vue
-index 5c690d0..88ddfea 100644
+index 5c690d0..5c9c0e7 100644
 --- a/src/components/ListviewItem.vue
 +++ b/src/components/ListviewItem.vue
-@@ -199,12 +199,18 @@
+@@ -199,15 +199,23 @@
        <div v-else-if="item.media_type == MediaType.COLLECTION">
          {{ $t("collection") }}
        </div>
@@ -52,7 +54,60 @@ index 5c690d0..88ddfea 100644
 +          ].includes(item.media_type)
          "
        >
-         {{ truncateString(item.metadata.description, 150) }}
+-        {{ truncateString(item.metadata.description, 150) }}
++        {{
++          truncateString(markdownToPlainText(item.metadata.description), 150)
++        }}
+       </div>
+       <!-- media type label -->
+       <div v-else-if="!('provider_mappings' in item)">
+@@ -315,6 +323,7 @@ import {
+   formatDuration,
+   getArtistsString,
+   getAuthorsNarratorsArray,
++  markdownToPlainText,
+   truncateString,
+ } from "@/helpers/utils";
+ import { getListItemProviderIconDomain } from "@/plugins/api/helpers";
+diff --git a/src/helpers/utils.ts b/src/helpers/utils.ts
+index 6e75012..1ff0839 100644
+--- a/src/helpers/utils.ts
++++ b/src/helpers/utils.ts
+@@ -679,6 +679,34 @@ export const markdownToHtml = function (text: string): string {
+   });
+ };
+ 
++/**
++ * Render markdown or HTML metadata as a single line of plain text.
++ *
++ * For the places that show a description as a subtitle. Podcast feeds hand us
++ * paragraphs, character entities and stray markup, none of which reads as a
++ * subtitle, and all of which eats the character budget before the truncation
++ * gets to any actual words.
++ *
++ * @param text - Markdown or HTML source.
++ */
++export const markdownToPlainText = function (text: string): string {
++  if (!text) return "";
++  // parsed detached and never inserted, so nothing here runs; going through
++  // markdownToHtml first keeps one sanitiser in front of all feed-supplied markup
++  const parsed = new DOMParser().parseFromString(
++    markdownToHtml(text),
++    "text/html",
++  );
++  // textContent welds blocks straight together, running the last word of one
++  // paragraph into the first of the next
++  for (const block of parsed.body.querySelectorAll(
++    "p, div, br, li, tr, h1, h2, h3, h4, h5, h6, blockquote",
++  )) {
++    block.before(" ");
++  }
++  return (parsed.body.textContent ?? "").replace(/\s+/g, " ").trim();
++};
++
+ /**
+  * Copy text to the clipboard.
+  *
 diff --git a/src/layouts/default/PlayerOSD/PlayerFullscreen.vue b/src/layouts/default/PlayerOSD/PlayerFullscreen.vue
 index 6534be5..f6a1d94 100644
 --- a/src/layouts/default/PlayerOSD/PlayerFullscreen.vue
@@ -479,6 +534,57 @@ index 2551a44..a37e227 100644
      "lyrics_loading": "Lyrics are being fetched...",
      "show_audio_chain_details": "Show audio pipeline details",
      "show_less": "Show less",
+diff --git a/tests/helpers/markdown.test.ts b/tests/helpers/markdown.test.ts
+index 6c57167..ec56730 100644
+--- a/tests/helpers/markdown.test.ts
++++ b/tests/helpers/markdown.test.ts
+@@ -5,7 +5,7 @@
+  * discards elements it should keep (lists, the leading paragraph), which would
+  * make every assertion below meaningless.
+  */
+-import { markdownToHtml } from "@/helpers/utils";
++import { markdownToHtml, markdownToPlainText } from "@/helpers/utils";
+ import { describe, expect, it, vi } from "vitest";
+ 
+ vi.mock("@/plugins/api", () => ({ api: {} }));
+@@ -73,3 +73,37 @@ describe("markdownToHtml", () => {
+     );
+   });
+ });
++
++describe("markdownToPlainText", () => {
++  it("drops the markup a podcast feed wraps its show notes in", () => {
++    expect(
++      markdownToPlainText('<p dir="ltr">Just hours after we dropped it</p>'),
++    ).toBe("Just hours after we dropped it");
++  });
++
++  it("decodes character entities rather than showing them", () => {
++    expect(markdownToPlainText("audio marked &#34;prison&#34;")).toBe(
++      'audio marked "prison"',
++    );
++    expect(markdownToPlainText("now that he&#39;s retired")).toBe(
++      "now that he's retired",
++    );
++  });
++
++  it("collapses paragraphs into one line", () => {
++    expect(markdownToPlainText("<p>first</p><p>second</p>")).toBe(
++      "first second",
++    );
++  });
++
++  it("keeps the text of inline emphasis", () => {
++    expect(markdownToPlainText("<em>Music in this episode</em>")).toBe(
++      "Music in this episode",
++    );
++  });
++
++  it("yields nothing for markup that carries no text", () => {
++    expect(markdownToPlainText("<script>alert(1)</script>")).toBe("");
++    expect(markdownToPlainText("")).toBe("");
++  });
++});
 diff --git a/tests/layouts/PlayerFullscreen.test.ts b/tests/layouts/PlayerFullscreen.test.ts
 index 04d4759..0f7b298 100644
 --- a/tests/layouts/PlayerFullscreen.test.ts
