@@ -21,8 +21,14 @@ name: Build patched add-on
 
 on:
   schedule:
-    # Mondays 04:17 UTC. Off the hour so it does not queue behind everyone else.
-    - cron: "17 4 * * 1"
+    # Daily, 04:17 UTC. Off the hour so it does not queue behind everyone else.
+    #
+    # Daily rather than weekly because nothing here reacts to an upstream release:
+    # a new stable tag fires no event in this repository, so the schedule is the
+    # only thing that notices one. Weekly meant running up to six days behind
+    # upstream. A run that finds nothing new exits in the resolve step below
+    # without building, so the cost of checking daily is a few seconds of runner.
+    - cron: "17 4 * * *"
   workflow_dispatch:
     inputs:
       server_ref:

@@ -74,8 +74,11 @@ everyone, not just whoever copied them.
 
 ## How the build works
 
-`.github/workflows/build-patched.yml`, weekly on Mondays plus manual dispatch,
-and immediately on any push that touches `patches/`.
+`.github/workflows/build-patched.yml`, daily plus manual dispatch, and
+immediately on any push that touches `patches/`.
+
+Daily because an upstream release fires no event here — the schedule is the only
+thing that sees one, and a run that finds nothing new exits without building.
 
 1. Resolve the newest upstream `x.y.z` release tag.
 2. Check out the frontend at the version that release pins, apply the frontend
