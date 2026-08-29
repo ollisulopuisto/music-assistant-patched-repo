@@ -86,8 +86,15 @@ thing that sees one, and a run that finds nothing new exits without building.
 3. Check out the server at that tag, apply the server patches, **run the Pocket
    Casts tests against the patched tree**, build the wheel.
 4. Build and push both architectures, join them under one tag.
-5. Bump this repository's `config.yaml`, which is what makes Home Assistant offer
-   the update.
+5. Write the add-on's `CHANGELOG.md` entry and bump its `config.yaml`, which is
+   what makes Home Assistant offer the update.
+
+The changelog is what Home Assistant shows in the update dialog, so it is
+generated rather than written by hand: `scripts/changelog.py` names the upstream
+release, quotes upstream's own notes for it, and lists the patches by reading
+their subject lines out of `patches/`. A patch that gets merged upstream and
+deleted therefore stops being claimed on the next build, with nothing to
+remember.
 
 Published as `ghcr.io/ollisulopuisto/ma-server-patched:<upstream>-upnext.<n>`,
 e.g. `2.10.0-upnext.1`. The version says what it was built from, and sorts above

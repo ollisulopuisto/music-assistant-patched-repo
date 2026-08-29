@@ -42,10 +42,13 @@ on:
         default: false
   push:
     branches: [main]
-    # a changed patch means a changed image, so republish without waiting for Monday
+    # a changed patch means a changed image, so republish without waiting for the
+    # next daily run. Editing this workflow usually does not change the image, and
+    # the no-op guard below only exempts scheduled runs - so a workflow edit would
+    # publish a new version that is byte-identical to the last. Use the manual
+    # dispatch, with force, when a workflow change really does need a rebuild.
     paths:
       - "patches/**"
-      - ".github/workflows/build-patched.yml"
 
 permissions:
   contents: write
@@ -403,6 +406,18 @@ jobs:
           docker buildx imagetools create --tag "${IMAGE_NAME}:${VERSION}" $sources
           docker buildx imagetools inspect "${IMAGE_NAME}:${VERSION}"
 
+      # Home Assistant shows CHANGELOG.md verbatim in the update dialog, and it is
+      # the only thing a user sees before accepting an update. Written here rather
+      # than by hand so it cannot drift from what was actually built.
+      - name: Write the changelog entry
+        env:
+          VERSION: ${{ needs.resolve.outputs.version }}
+          SERVER_REF: ${{ needs.resolve.outputs.server_ref }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          python scripts/changelog.py --version "$VERSION" --server-ref "$SERVER_REF"
+
       - name: Point the add-on at the new image
         env:
           VERSION: ${{ needs.resolve.outputs.version }}
@@ -424,7 +439,7 @@ jobs:
           PY
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add "$ADDON_CONFIG"
+          git add "$ADDON_CONFIG" "$(dirname "$ADDON_CONFIG")/CHANGELOG.md"
           git commit -m "Publish $VERSION (upstream $SERVER_REF)"
           git push
 
