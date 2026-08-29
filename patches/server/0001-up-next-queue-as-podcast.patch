@@ -1,0 +1,450 @@
+From 87efef9278fe4a6946577c39ad8a1beda243afd7 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 27 Aug 2026 21:53:30 +0000
+Subject: [PATCH] Surface the Pocket Casts Up Next queue as a podcast
+
+The Up Next queue was only reachable as a read-only browse folder, so a
+listener who started an episode on their phone had no way to continue it on a
+Music Assistant speaker. It is now a podcast in the library, sitting with the
+rest of the listening rather than among music playlists.
+
+It is named "Pocket Casts: Up Next" because the library merges items whose
+normalised names match and there is a real Pocket Casts show called "Up Next";
+a subscriber to that show would otherwise find the queue folded into it. It
+carries no artwork of its own, which falls back to the provider icon.
+
+up_next/list now sends a body so the queue comes back ordered and carrying
+playingStatus/playedUpTo, which gives each queued episode its resume point
+without a second lookup. The queue is not a subscription, so its id is refused
+for subscribe/unsubscribe rather than sent to Pocket Casts, which has no
+podcast behind it. Its episodes keep naming the show they came from, since the
+queue mixes shows.
+
+The mixed-podcast episode conversion is now shared between the browse folders
+and the queue; as a side effect In Progress, History and Starred pick up the
+playback status their payloads already carried.
+---
+ .../providers/pocketcasts/__init__.py         |  93 +++++++++-
+ .../providers/pocketcasts/api_client.py       |  15 +-
+ .../providers/pocketcasts/test_pocketcasts.py | 169 ++++++++++++++++++
+ 3 files changed, 267 insertions(+), 10 deletions(-)
+
+diff --git a/music_assistant/providers/pocketcasts/__init__.py b/music_assistant/providers/pocketcasts/__init__.py
+index 1459a3a..229eba8 100644
+--- a/music_assistant/providers/pocketcasts/__init__.py
++++ b/music_assistant/providers/pocketcasts/__init__.py
+@@ -55,7 +55,15 @@ if TYPE_CHECKING:
+ LOGGER = logging.getLogger(__name__)
+ 
+ FULLY_PLAYED_THRESHOLD = 0.9
+-SPECIAL_FOLDERS = ("up_next", "new_releases", "in_progress", "starred", "history")
++# Pocket Casts has exactly one queue, which is surfaced as a podcast of its own so it sits
++# with the rest of the listening rather than among music playlists. The id is fixed and
++# doubles as the id of the browse folder listing the same queue.
++UP_NEXT_PODCAST_ID = "up_next"
++# Music Assistant merges library items whose normalised names match, and there is a real
++# Pocket Casts show called "Up Next" - the queue has to carry a name no feed would use or it
++# disappears into that show's library entry instead of getting one of its own.
++UP_NEXT_PODCAST_NAME = "Pocket Casts: Up Next"
++SPECIAL_FOLDERS = (UP_NEXT_PODCAST_ID, "new_releases", "in_progress", "starred", "history")
+ 
+ SUPPORTED_FEATURES = {
+     ProviderFeature.LIBRARY_PODCASTS,
+@@ -190,7 +198,8 @@ class PocketCastsProvider(MusicProvider):
+         await self._client.login(str(email), str(password))
+ 
+     async def get_library_podcasts(self) -> AsyncGenerator[Podcast]:
+-        """Get all podcasts from the user's library."""
++        """Get all podcasts from the user's library, led by the Up Next queue."""
++        yield self._create_up_next_podcast()
+         for podcast_data in await self._client.get_subscribed_podcasts():
+             yield self._convert_podcast(podcast_data)
+ 
+@@ -200,6 +209,10 @@ class PocketCastsProvider(MusicProvider):
+ 
+         :param item: The media item to add to the library.
+         """
++        if item.media_type == MediaType.PODCAST and item.item_id == UP_NEXT_PODCAST_ID:
++            # the queue is not a subscription; it can sit in the Music Assistant library
++            # without there being anything on Pocket Casts to subscribe to
++            return True
+         if not isinstance(item, Podcast):
+             return await super().library_add(item)
+         await self._client.subscribe_podcast(item.item_id)
+@@ -212,6 +225,9 @@ class PocketCastsProvider(MusicProvider):
+         :param prov_item_id: The provider item ID to remove from the library.
+         :param media_type: The media type of the item.
+         """
++        if media_type == MediaType.PODCAST and prov_item_id == UP_NEXT_PODCAST_ID:
++            # nothing to unsubscribe from: Pocket Casts has no podcast by that id
++            return True
+         if media_type != MediaType.PODCAST:
+             return await super().library_remove(prov_item_id, media_type)
+         await self._client.unsubscribe_podcast(prov_item_id)
+@@ -224,6 +240,8 @@ class PocketCastsProvider(MusicProvider):
+ 
+         :param prov_podcast_id: The provider podcast id.
+         """
++        if prov_podcast_id == UP_NEXT_PODCAST_ID:
++            return self._create_up_next_podcast()
+         podcast_data = await self._client.get_podcast(prov_podcast_id)
+         if not podcast_data:
+             raise MediaNotFoundError(
+@@ -237,6 +255,15 @@ class PocketCastsProvider(MusicProvider):
+ 
+         :param prov_podcast_id: The provider podcast id.
+         """
++        if prov_podcast_id == UP_NEXT_PODCAST_ID:
++            # the queue is a live ordering rather than a feed, so it is never cached and its
++            # episodes keep naming the show they came from
++            episodes = await self._convert_mixed_episodes(await self._client.get_up_next_episodes())
++            for queue_position, queue_episode in enumerate(episodes):
++                queue_episode.position = queue_position
++                yield queue_episode
++            return
++
+         # fetch episode metadata, user status and show notes in parallel
+         (podcast_name, episodes), in_progress, history, show_notes = await asyncio.gather(
+             self._client.get_podcast_episodes(prov_podcast_id),
+@@ -424,6 +451,15 @@ class PocketCastsProvider(MusicProvider):
+         if media_type != MediaType.PODCAST_EPISODE or not isinstance(media_item, PodcastEpisode):
+             return
+         podcast_uuid, episode_uuid = prov_item_id.split(":", 1)
++        # what reached Pocket Casts is otherwise invisible from this side, which makes a resume
++        # point that looks wrong in the app impossible to attribute without guessing
++        self.logger.debug(
++            "Reporting episode %s: position=%s, fully_played=%s, is_playing=%s",
++            episode_uuid,
++            position,
++            fully_played,
++            is_playing,
++        )
+ 
+         # MA reports fully_played=True when an episode is skipped/stopped, not only when it
+         # truly ends, so confirm completion against the real position before marking it played.
+@@ -604,10 +640,25 @@ class PocketCastsProvider(MusicProvider):
+         # never on mere history membership. Both fields are always set so the library sync can
+         # clear a stale completed/resume value (it only updates when both are non-None).
+         status_data = in_progress_map.get(episode_uuid) or history_map.get(episode_uuid) or {}
++        self._apply_playback_status(episode_item, status_data, episode_data.get("duration") or 0)
++
++    def _apply_playback_status(
++        self,
++        episode_item: PodcastEpisode,
++        status_data: dict[str, Any],
++        fallback_duration: int = 0,
++    ) -> None:
++        """
++        Apply a raw playback status payload to a PodcastEpisode.
++
++        :param episode_item: The episode object to enrich in place.
++        :param status_data: Raw data carrying playedUpTo/duration/playingStatus, if any.
++        :param fallback_duration: Duration to fall back on when the status carries none.
++        """
+         # feeds that omit a duration yield an explicit null rather than a missing key, so
+         # coerce instead of relying on a dict default
+         played_up_to = status_data.get("playedUpTo") or 0
+-        duration = status_data.get("duration") or episode_data.get("duration") or 0
++        duration = status_data.get("duration") or fallback_duration
+         completed = status_data.get("playingStatus") == 3 or (
+             duration > 0 and (played_up_to / duration) > FULLY_PLAYED_THRESHOLD
+         )
+@@ -623,14 +674,22 @@ class PocketCastsProvider(MusicProvider):
+         :param folder_name: Name of the special folder (up_next, new_releases, etc.)
+         """
+         folder_getters = {
+-            "up_next": self._client.get_up_next_episodes,
++            UP_NEXT_PODCAST_ID: self._client.get_up_next_episodes,
+             "new_releases": self._client.get_new_releases,
+             "in_progress": self._client.get_in_progress_episodes,
+             "starred": self._client.get_starred_episodes,
+             "history": self._client.get_history,
+         }
+-        episode_list = await folder_getters[folder_name]()
++        return list(await self._convert_mixed_episodes(await folder_getters[folder_name]()))
++
++    async def _convert_mixed_episodes(
++        self, episode_list: list[dict[str, Any]]
++    ) -> list[PodcastEpisode]:
++        """
++        Convert a listing that mixes episodes from several podcasts, preserving its order.
+ 
++        :param episode_list: Raw episode payloads from a queue/history style endpoint.
++        """
+         # (episode, podcast uuid, podcast name) per episode, the name empty when the folder
+         # payload does not carry it
+         resolved: list[tuple[dict[str, Any], str, str]] = []
+@@ -664,7 +723,7 @@ class PocketCastsProvider(MusicProvider):
+         looked_up = await asyncio.gather(*(self._get_podcast_name(uuid) for uuid in missing))
+         names = dict(zip(missing, looked_up, strict=True))
+ 
+-        items: list[MediaItemType | BrowseFolder] = []
++        items: list[PodcastEpisode] = []
+         for episode_data, podcast_uuid, podcast_name in resolved:
+             if episode_item := self._convert_episode(
+                 episode_data,
+@@ -672,13 +731,15 @@ class PocketCastsProvider(MusicProvider):
+                 show_notes=None,
+                 podcast_name=podcast_name or names.get(podcast_uuid, ""),
+             ):
++                # these endpoints carry the playback status inline, so no extra lookup is needed
++                self._apply_playback_status(episode_item, episode_data, episode_item.duration or 0)
+                 items.append(episode_item)
+         return items
+ 
+     def _create_browse_folders(self) -> list[BrowseFolder]:
+         """Create special browse folders for root level."""
+         folders = [
+-            ("up_next", "Up Next"),
++            (UP_NEXT_PODCAST_ID, "Up Next"),
+             ("new_releases", "New Releases"),
+             ("in_progress", "In Progress"),
+             ("starred", "Starred"),
+@@ -700,6 +761,24 @@ class PocketCastsProvider(MusicProvider):
+             for folder_id, name in folders
+         ]
+ 
++    def _create_up_next_podcast(self) -> Podcast:
++        """Return the Up Next queue as a podcast - Pocket Casts has exactly one."""
++        return Podcast(
++            item_id=UP_NEXT_PODCAST_ID,
++            provider=self.instance_id,
++            name=UP_NEXT_PODCAST_NAME,
++            publisher="Pocket Casts",
++            provider_mappings={
++                ProviderMapping(
++                    item_id=UP_NEXT_PODCAST_ID,
++                    provider_domain=self.domain,
++                    provider_instance=self.instance_id,
++                )
++            },
++            # deliberately no artwork: the queue has none of its own, and an item without
++            # images falls back to the provider's icon, which is the Pocket Casts mark
++        )
++
+     async def _announce_playback_start(
+         self, podcast_uuid: str, episode_uuid: str, episode: PodcastEpisode
+     ) -> None:
+diff --git a/music_assistant/providers/pocketcasts/api_client.py b/music_assistant/providers/pocketcasts/api_client.py
+index bd2880d..15353c0 100644
+--- a/music_assistant/providers/pocketcasts/api_client.py
++++ b/music_assistant/providers/pocketcasts/api_client.py
+@@ -136,12 +136,19 @@ class PocketCastsClient:
+         return episodes
+ 
+     async def get_up_next_episodes(self) -> list[dict[str, Any]]:
+-        """Return the Up Next queue episodes."""
+-        data = await self._request("POST", f"{API_BASE_URL}/up_next/list")
++        """Return the Up Next queue episodes, in queue order."""
++        # showPlayStatus asks the server to include playingStatus/playedUpTo per episode, which
++        # saves a separate in-progress lookup when resolving resume points for the queue.
++        data = await self._request(
++            "POST",
++            f"{API_BASE_URL}/up_next/list",
++            json={"version": 2, "model": "webplayer", "serverModified": 0, "showPlayStatus": True},
++        )
+         episodes = data.get("episodes", [])
+         # the up_next endpoint returns a uuid-keyed map; normalise to a list carrying the uuid
+         if isinstance(episodes, dict):
+-            return [{"uuid": uuid, **episode} for uuid, episode in episodes.items()]
++            episodes = [{"uuid": uuid, **episode} for uuid, episode in episodes.items()]
++        self.logger.debug("Retrieved %d Up Next episodes", len(episodes))
+         return cast("list[dict[str, Any]]", episodes)
+ 
+     async def get_new_releases(self) -> list[dict[str, Any]]:
+@@ -297,6 +304,8 @@ class PocketCastsClient:
+         :param url: The episode audio URL.
+         :param published: The episode publish date (ISO format), optional.
+         """
++        # Pocket Casts stores the queue as full entries rather than references, so a uuid on
++        # its own is rejected - the title and audio url have to travel with it.
+         episode: dict[str, Any] = {
+             "uuid": episode_uuid,
+             "podcast": podcast_uuid,
+diff --git a/tests/providers/pocketcasts/test_pocketcasts.py b/tests/providers/pocketcasts/test_pocketcasts.py
+index 5143c1f..1bafdf0 100644
+--- a/tests/providers/pocketcasts/test_pocketcasts.py
++++ b/tests/providers/pocketcasts/test_pocketcasts.py
+@@ -37,6 +37,8 @@ def provider(client: AsyncMock) -> PocketCastsProvider:
+     config.get_value.return_value = None
+     prov = PocketCastsProvider(mass, manifest, config)
+     prov._client = client
++    # handle_async_init would set this up; it is skipped here since it also logs in
++    prov._announced_episodes = set()
+     return prov
+ 
+ 
+@@ -329,3 +331,170 @@ async def test_special_folder_looks_each_podcast_up_once(
+     episodes = [item for item in items if isinstance(item, PodcastEpisode)]
+     assert [episode.podcast.name for episode in episodes] == ["Podcast One"] * 3
+     assert client.get_podcast.await_count == 1
++
++
++def _up_next_episode(index: int, **overrides: Any) -> dict[str, Any]:
++    """Build an Up Next queue entry as the up_next/list endpoint returns it."""
++    return {
++        "uuid": f"episode-{index}",
++        "title": f"Episode {index}",
++        "url": f"https://example.com/ep{index}.mp3",
++        "podcast": {"uuid": "podcast-1", "title": "Podcast One"},
++        "duration": 1000,
++        **overrides,
++    }
++
++
++async def _up_next_episodes(provider: PocketCastsProvider) -> list[PodcastEpisode]:
++    """Return the episodes the Up Next queue podcast offers."""
++    return [episode async for episode in provider.get_podcast_episodes("up_next")]
++
++
++def _episode_item(provider: PocketCastsProvider) -> PodcastEpisode:
++    """Build a PodcastEpisode the way the provider itself builds one, mappings included."""
++    episode = provider._convert_episode(
++        _up_next_episode(1), "podcast-1", podcast_name="Podcast One"
++    )
++    assert episode is not None
++    return episode
++
++
++async def test_up_next_is_offered_as_a_podcast(
++    provider: PocketCastsProvider, client: AsyncMock
++) -> None:
++    """The queue sits with the podcasts rather than among music playlists."""
++    client.get_subscribed_podcasts.return_value = [{"uuid": "podcast-1", "title": "Podcast One"}]
++
++    podcasts = [podcast async for podcast in provider.get_library_podcasts()]
++
++    assert [podcast.item_id for podcast in podcasts] == ["up_next", "podcast-1"]
++    # a real Pocket Casts show is called "Up Next"; sharing that name would have the library
++    # fold the queue into it instead of giving it a row of its own
++    assert podcasts[0].name == "Pocket Casts: Up Next"
++    assert await provider.get_podcast("up_next") == podcasts[0]
++    client.get_podcast.assert_not_called()
++
++
++async def test_the_queue_wears_the_provider_icon(provider: PocketCastsProvider) -> None:
++    """The queue has no artwork of its own, so it must not carry any: bare falls back."""
++    up_next = await provider.get_podcast("up_next")
++
++    assert not up_next.metadata.images
++
++
++async def test_the_queue_is_not_a_subscription(
++    provider: PocketCastsProvider, client: AsyncMock
++) -> None:
++    """Pocket Casts has no podcast behind the queue's id, so it must not be (un)subscribed."""
++    up_next = await provider.get_podcast("up_next")
++
++    assert await provider.library_add(up_next) is True
++    assert await provider.library_remove("up_next", MediaType.PODCAST) is True
++
++    client.subscribe_podcast.assert_not_called()
++    client.unsubscribe_podcast.assert_not_called()
++
++
++async def test_up_next_episodes_keep_the_queue_order(
++    provider: PocketCastsProvider, client: AsyncMock
++) -> None:
++    """The queue order is the episode order, and is reported through the item positions."""
++    client.get_up_next_episodes.return_value = [_up_next_episode(index) for index in (3, 1, 2)]
++
++    episodes = await _up_next_episodes(provider)
++
++    assert [episode.item_id for episode in episodes] == [
++        "podcast-1:episode-3",
++        "podcast-1:episode-1",
++        "podcast-1:episode-2",
++    ]
++    assert [episode.position for episode in episodes] == [0, 1, 2]
++
++
++async def test_up_next_episodes_name_the_show_they_came_from(
++    provider: PocketCastsProvider, client: AsyncMock
++) -> None:
++    """The queue mixes shows, so each episode has to say which one it belongs to."""
++    client.get_up_next_episodes.return_value = [_up_next_episode(1)]
++
++    episodes = await _up_next_episodes(provider)
++
++    assert episodes[0].podcast.name == "Podcast One"
++    assert episodes[0].podcast.item_id == "podcast-1"
++
++
++async def test_up_next_episodes_carry_their_resume_point(
++    provider: PocketCastsProvider, client: AsyncMock
++) -> None:
++    """A queued episode already part-listened resumes where it was left off."""
++    client.get_up_next_episodes.return_value = [
++        _up_next_episode(1, playedUpTo=300, playingStatus=2),
++        _up_next_episode(2),
++    ]
++
++    episodes = await _up_next_episodes(provider)
++
++    assert episodes[0].resume_position_ms == 300000
++    assert episodes[0].fully_played is False
++    assert episodes[1].resume_position_ms == 0
++
++
++async def test_queue_entry_without_a_podcast_is_skipped(
++    provider: PocketCastsProvider, client: AsyncMock
++) -> None:
++    """An entry naming no podcast cannot be turned into an item, and must not sink the rest."""
++    client.get_up_next_episodes.return_value = [
++        {"uuid": "episode-0", "title": "Orphan", "url": "https://example.com/ep0.mp3"},
++        _up_next_episode(1),
++    ]
++
++    episodes = await _up_next_episodes(provider)
++
++    assert [episode.item_id for episode in episodes] == ["podcast-1:episode-1"]
++    assert episodes[0].position == 0
++
++
++async def test_browse_folders_report_playback_status(
++    provider: PocketCastsProvider, client: AsyncMock
++) -> None:
++    """The mixed folders carry playback status inline, so their episodes should show it."""
++    client.get_history.return_value = [
++        _up_next_episode(1, playedUpTo=600, playingStatus=2),
++        _up_next_episode(2, playingStatus=3),
++    ]
++
++    items = await provider.browse("pocketcasts://history")
++
++    episodes = [item for item in items if isinstance(item, PodcastEpisode)]
++    assert [episode.resume_position_ms for episode in episodes] == [600000, 0]
++    assert [episode.fully_played for episode in episodes] == [False, True]
++
++
++async def test_finishing_an_episode_clears_it_from_the_queue(
++    provider: PocketCastsProvider, client: AsyncMock
++) -> None:
++    """A finished episode leaves Up Next, so the queue does not keep serving it back."""
++    episode = _episode_item(provider)
++
++    await provider.on_played(
++        MediaType.PODCAST_EPISODE, "podcast-1:episode-1", True, 990, episode, is_playing=False
++    )
++
++    client.mark_episode_played.assert_awaited_once_with("podcast-1", "episode-1")
++    client.remove_from_up_next.assert_awaited_once_with("episode-1")
++    client.archive_episode.assert_awaited_once_with("podcast-1", "episode-1", archive=True)
++
++
++async def test_stopping_early_leaves_the_episode_queued(
++    provider: PocketCastsProvider, client: AsyncMock
++) -> None:
++    """Stopping partway is not finishing, so the episode keeps its place in Up Next."""
++    episode = _episode_item(provider)
++
++    await provider.on_played(
++        MediaType.PODCAST_EPISODE, "podcast-1:episode-1", True, 200, episode, is_playing=False
++    )
++
++    client.remove_from_up_next.assert_not_awaited()
++    client.mark_episode_played.assert_not_awaited()
++    client.update_episode_progress.assert_awaited_once_with("podcast-1", "episode-1", 200)
+-- 
+2.43.0
+

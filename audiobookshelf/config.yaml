@@ -1,30 +1,45 @@
 name: "Audiobookshelf"
-version: "v2.36.0"
+version: "2.36.0"
 slug: "audiobookshelf"
 description: "Self-hosted audiobook and podcast server, with server-side progress"
-url: "https://www.audiobookshelf.org"
+url: "https://www.audiobookshelf.org/"
 arch:
   - aarch64
   - amd64
-  - armv7
+
+# Upstream's own multi-architecture image, used as published. Nothing is rebuilt here,
+# so "version" is simply the Audiobookshelf release this add-on installs.
 image: "ghcr.io/advplyr/audiobookshelf"
+# the image already sets its own tini entrypoint
 init: false
-map:
-  - config:rw
-  - share:rw
-  - media:rw
+
+# Audiobookshelf listens on 80 inside the container; 13378 is the port its own
+# documentation uses on the outside, so anything written for it still applies.
+# A real port rather than ingress: Music Assistant has to reach this over the
+# network - including a second instance across Tailscale - and ingress only ever
+# serves a browser.
 ports:
   80/tcp: 13378
 ports_description:
-  80/tcp: "Audiobookshelf Web UI and API"
+  80/tcp: "Audiobookshelf web interface and API"
+webui: "http://[HOST]:[PORT:80]"
+
+# Only /data persists for an add-on, and the image defaults these to /config and
+# /metadata, which do not. Both are env-overridable (see the image's Dockerfile).
 environment:
-  CONFIG_PATH: "/config"
-  METADATA_PATH: "/config/metadata"
-options:
-  AUDIOBOOKSHELF_UID: 0
-  AUDIOBOOKSHELF_GID: 0
-schema:
-  AUDIOBOOKSHELF_UID: int?
-  AUDIOBOOKSHELF_GID: int?
-panel_icon: "mdi:bookshelf"
-panel_title: "Audiobookshelf"
+  CONFIG_PATH: /data/config
+  METADATA_PATH: /data/metadata
+
+# where the library is expected to live; point Audiobookshelf at /media/... when
+# you add a library inside it
+map:
+  - media:rw
+  - share:rw
+
+# cover art and cached artwork regenerate, and would otherwise land in every backup
+backup_exclude:
+  - metadata/cache/*
+  - metadata/covers/*
+
+panel_icon: mdi:book-music
+panel_title: Audiobookshelf

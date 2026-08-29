@@ -1,0 +1,697 @@
+From a1de0ccddf460a34d8238b9b70065a6fdcf3c057 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 27 Aug 2026 21:17:37 +0000
+Subject: [PATCH] Show a podcast episode's show notes where lyrics go
+
+An episode's show notes reached the frontend and stopped there: nothing
+rendered them. Podcast episodes have no detail view of their own, and the two
+places a description could have surfaced both turned them away - the list
+subtitle allows only radio and playlists, and the fullscreen player's side panel
+was gated to tracks.
+
+Both now let an episode through. In a listing its notes read as the subtitle, the
+one line that tells two episodes of the same show apart. In the fullscreen player
+the existing panel and its header button now open either a track's lyrics or an
+episode's notes, named and iconed for whichever it holds.
+
+The two share the column, not their source: show notes ride along on the queue
+item, so there is nothing to fetch and no loading state, and the ~60fps clock
+that drives synced lyrics never starts for them. Notes render through
+MarkdownText, which sanitises the markup podcast feeds carry and sends its links
+to a new tab.
+---
+ src/components/ListviewItem.vue               |  15 +-
+ src/helpers/utils.ts                          |  28 ++++
+ .../default/PlayerOSD/PlayerFullscreen.vue    | 136 +++++++++++++-----
+ .../PlayerFullscreenHeaderControls.vue        |  79 ++++++----
+ .../default/PlayerOSD/useFullscreenQueue.ts   |  10 +-
+ src/translations/en.json                      |   4 +
+ tests/helpers/markdown.test.ts                |  36 ++++-
+ tests/layouts/PlayerFullscreen.test.ts        |  73 +++++++++-
+ 8 files changed, 306 insertions(+), 75 deletions(-)
+
+diff --git a/src/components/ListviewItem.vue b/src/components/ListviewItem.vue
+index 5c690d0..5c9c0e7 100644
+--- a/src/components/ListviewItem.vue
++++ b/src/components/ListviewItem.vue
+@@ -199,15 +199,23 @@
+       <div v-else-if="item.media_type == MediaType.COLLECTION">
+         {{ $t("collection") }}
+       </div>
+-      <!-- description -->
++      <!-- description: for a podcast episode this is its show notes, which say
++           what the episode is about - the one line that tells two episodes of
++           the same show apart in a listing -->
+       <div
+         v-else-if="
+           'metadata' in item &&
+           item.metadata?.description &&
+-          [MediaType.RADIO, MediaType.PLAYLIST].includes(item.media_type)
++          [
++            MediaType.RADIO,
++            MediaType.PLAYLIST,
++            MediaType.PODCAST_EPISODE,
++          ].includes(item.media_type)
+         "
+       >
+-        {{ truncateString(item.metadata.description, 150) }}
++        {{
++          truncateString(markdownToPlainText(item.metadata.description), 150)
++        }}
+       </div>
+       <!-- media type label -->
+       <div v-else-if="!('provider_mappings' in item)">
+@@ -315,6 +323,7 @@ import {
+   formatDuration,
+   getArtistsString,
+   getAuthorsNarratorsArray,
++  markdownToPlainText,
+   truncateString,
+ } from "@/helpers/utils";
+ import { getListItemProviderIconDomain } from "@/plugins/api/helpers";
+diff --git a/src/helpers/utils.ts b/src/helpers/utils.ts
+index 6e75012..1ff0839 100644
+--- a/src/helpers/utils.ts
++++ b/src/helpers/utils.ts
+@@ -679,6 +679,34 @@ export const markdownToHtml = function (text: string): string {
+   });
+ };
+ 
++/**
++ * Render markdown or HTML metadata as a single line of plain text.
++ *
++ * For the places that show a description as a subtitle. Podcast feeds hand us
++ * paragraphs, character entities and stray markup, none of which reads as a
++ * subtitle, and all of which eats the character budget before the truncation
++ * gets to any actual words.
++ *
++ * @param text - Markdown or HTML source.
++ */
++export const markdownToPlainText = function (text: string): string {
++  if (!text) return "";
++  // parsed detached and never inserted, so nothing here runs; going through
++  // markdownToHtml first keeps one sanitiser in front of all feed-supplied markup
++  const parsed = new DOMParser().parseFromString(
++    markdownToHtml(text),
++    "text/html",
++  );
++  // textContent welds blocks straight together, running the last word of one
++  // paragraph into the first of the next
++  for (const block of parsed.body.querySelectorAll(
++    "p, div, br, li, tr, h1, h2, h3, h4, h5, h6, blockquote",
++  )) {
++    block.before(" ");
++  }
++  return (parsed.body.textContent ?? "").replace(/\s+/g, " ").trim();
++};
++
+ /**
+  * Copy text to the clipboard.
+  *
+diff --git a/src/layouts/default/PlayerOSD/PlayerFullscreen.vue b/src/layouts/default/PlayerOSD/PlayerFullscreen.vue
+index 6534be5..f6a1d94 100644
+--- a/src/layouts/default/PlayerOSD/PlayerFullscreen.vue
++++ b/src/layouts/default/PlayerOSD/PlayerFullscreen.vue
+@@ -47,9 +47,10 @@
+         </template>
+         <template #append>
+           <PlayerFullscreenHeaderControls
+-            :lyrics-state="lyricsState"
+-            :lyrics-active="showLyrics"
+-            @toggle-lyrics="toggleLyrics"
++            :side-panel-kind="sidePanelKind"
++            :side-panel-state="sidePanelState"
++            :side-panel-active="showSidePanel"
++            @toggle-side-panel="toggleSidePanel"
+           />
+ 
+           <Button
+@@ -195,13 +196,21 @@
+           </div>
+         </div>
+ 
+-        <!-- right column: queue items or lyrics-->
++        <!-- right column: queue items, lyrics or show notes-->
+         <div
+           v-if="showRightColumn && store.activePlayerQueue"
+           class="main-queue-items"
+         >
++          <!-- Show notes view: what a podcast episode is about. Rendered as
++               markdown-with-html, which is what podcast feeds carry -->
++          <ScrollArea
++            v-if="showSidePanel && sidePanelKind === 'notes'"
++            class="show-notes-wrapper"
++          >
++            <MarkdownText :text="showNotes" class="show-notes-content" />
++          </ScrollArea>
+           <!-- Lyrics view -->
+-          <div v-if="showLyrics" class="lyrics-wrapper">
++          <div v-else-if="showSidePanel" class="lyrics-wrapper">
+             <LyricsViewer
+               :media-item="store.curQueueItem?.media_item"
+               :position="lyricsElapsedTime"
+@@ -488,11 +497,13 @@
+ 
+ <script setup lang="ts">
+ import LyricsViewer from "@/components/LyricsViewer.vue";
++import MarkdownText from "@/components/MarkdownText.vue";
+ import MarqueeText from "@/components/MarqueeText.vue";
+ import PanelDragHandle from "@/components/PanelDragHandle.vue";
+ import PlayerIcon from "@/components/PlayerIcon.vue";
+ import VisualizerCanvas from "@/components/VisualizerCanvas.vue";
+ import { Button } from "@/components/ui/button";
++import { ScrollArea } from "@/components/ui/scroll-area";
+ import { useLyricsElapsedTime } from "@/composables/lyrics/useLyricsElapsedTime";
+ import { useLyricsOffset } from "@/composables/lyrics/useLyricsOffset";
+ import { useActiveTrackWaveform } from "@/composables/useActiveTrackWaveform";
+@@ -697,71 +708,99 @@ const hasLyrics = computed(() => {
+ // True while we're fetching lyrics for the current track.
+ const lyricsLoading = ref(false);
+ 
+-// Drives the lyrics header button: whether lyrics can be shown, are loading,
+-// or are unavailable (and why).
+-const lyricsState = computed<
++// What the side panel holds for the current item: a track's lyrics, a podcast
++// episode's show notes, or nothing. The two share the header button and the
++// column, not their source.
++const sidePanelKind = computed<"lyrics" | "notes" | null>(() => {
++  switch (store.curQueueItem?.media_item?.media_type) {
++    case MediaType.TRACK:
++      return "lyrics";
++    case MediaType.PODCAST_EPISODE:
++      return "notes";
++    default:
++      return null;
++  }
++});
++
++// Show notes ride along on the queue item, so unlike lyrics there is nothing to
++// fetch and no loading state to sit through.
++const showNotes = computed(() =>
++  sidePanelKind.value === "notes"
++    ? store.curQueueItem?.media_item?.metadata?.description?.trim() || null
++    : null,
++);
++
++// Drives the side panel's header button: whether the panel can be shown, is
++// loading, or is unavailable (and why).
++const sidePanelState = computed<
+   "available" | "loading" | "unavailable-song" | "none"
+ >(() => {
+-  if (!store.curQueueItem) return "none";
+-  // Lyrics only make sense for tracks; hide the button entirely otherwise.
+-  if (store.curQueueItem.media_item?.media_type !== MediaType.TRACK)
+-    return "none";
++  if (!store.curQueueItem || !sidePanelKind.value) return "none";
++  if (sidePanelKind.value === "notes")
++    return showNotes.value ? "available" : "unavailable-song";
+   if (lyricsLoading.value) return "loading";
+   if (hasLyrics.value) return "available";
+   return "unavailable-song";
+ });
+ 
+-// Lyrics are reached through a dedicated button in the header and shown in
+-// their own panel, independent of the queue list (which has its own toggle).
+-const showLyrics = ref(false);
++// The panel is reached through a dedicated button in the header and shown in
++// its own column, independent of the queue list (which has its own toggle).
++const showSidePanel = ref(false);
+ 
+-const toggleLyrics = () => {
+-  showLyrics.value = !showLyrics.value;
++const toggleSidePanel = () => {
++  showSidePanel.value = !showSidePanel.value;
+ };
+ 
+-// This component stays mounted while the dialog is closed and the lyrics panel
+-// keeps its state across open/close, so both are checked: the ~60fps loop only
+-// runs while the lyrics viewer it feeds is actually on screen.
++// This component stays mounted while the dialog is closed and the panel keeps
++// its state across open/close, so both are checked: the ~60fps loop only runs
++// while the lyrics viewer it feeds is actually on screen. Show notes do not
++// follow the playhead, so they never start it.
+ const lyricsVisible = computed(
+-  () => store.showFullscreenPlayer && showLyrics.value,
++  () =>
++    store.showFullscreenPlayer &&
++    showSidePanel.value &&
++    sidePanelKind.value === "lyrics",
+ );
+ const { elapsedTime: lyricsElapsedTime } = useLyricsElapsedTime(lyricsVisible);
+ 
+ // If the panel was opened optimistically while lyrics were still loading but
+ // the track turns out to have none, close it again so we don't show an empty
+ // panel.
+-watch(lyricsState, (state) => {
+-  if (showLyrics.value && (state === "unavailable-song" || state === "none")) {
+-    showLyrics.value = false;
++watch(sidePanelState, (state) => {
++  if (
++    showSidePanel.value &&
++    (state === "unavailable-song" || state === "none")
++  ) {
++    showSidePanel.value = false;
+   }
+ });
+ 
+-// The right column shows either the queue or the lyrics, never both (lyrics
+-// render on top of the queue's slot). Keep the two toggles mutually exclusive
+-// so each button visibly swaps the panel instead of silently flipping a hidden
+-// state. Opening lyrics remembers whether the queue was showing so closing them
+-// returns there rather than to the bare artwork.
+-let queueVisibleBeforeLyrics = false;
+-watch(showLyrics, (active) => {
++// The right column shows either the queue or the side panel, never both (the
++// panel renders on top of the queue's slot). Keep the two toggles mutually
++// exclusive so each button visibly swaps the panel instead of silently flipping
++// a hidden state. Opening the panel remembers whether the queue was showing so
++// closing it returns there rather than to the bare artwork.
++let queueVisibleBeforePanel = false;
++watch(showSidePanel, (active) => {
+   if (active) {
+-    queueVisibleBeforeLyrics = store.showQueueItems;
++    queueVisibleBeforePanel = store.showQueueItems;
+     store.showQueueItems = false;
+-  } else if (queueVisibleBeforeLyrics) {
++  } else if (queueVisibleBeforePanel) {
+     store.showQueueItems = true;
+-    queueVisibleBeforeLyrics = false;
++    queueVisibleBeforePanel = false;
+   }
+ });
+ watch(
+   () => store.showQueueItems,
+   (active) => {
+-    if (active) showLyrics.value = false;
++    if (active) showSidePanel.value = false;
+   },
+ );
+ 
+-// Whether the right-hand column (queue list or lyrics) is visible. Used to
++// Whether the right-hand column (queue list or side panel) is visible. Used to
+ // collapse the media details column on small/narrow screens.
+ const showRightColumn = computed(
+-  () => store.showQueueItems || showLyrics.value,
++  () => store.showQueueItems || showSidePanel.value,
+ );
+ 
+ // The unified queue list (virtualized rows, paging, now-playing focus and
+@@ -788,7 +827,7 @@ const {
+   draggedItem,
+   ghostY,
+   rowOffset,
+-} = useFullscreenQueue(showLyrics);
++} = useFullscreenQueue(showSidePanel);
+ 
+ // Protocols with accurate playback time reporting don't need a latency offset.
+ const ACCURATE_TIME_PROTOCOLS = ["airplay"];
+@@ -1197,7 +1236,11 @@ const openQueueMenu = function (evt: Event) {
+   }
+   // While lyrics are open, surface the sync-offset stepper at the top of the
+   // overflow menu (only for players that benefit from a latency offset).
+-  if (showLyrics.value && showLyricsOffset.value) {
++  if (
++    showSidePanel.value &&
++    sidePanelKind.value === "lyrics" &&
++    showLyricsOffset.value
++  ) {
+     menuItems.unshift({
+       label: "lyrics_offset",
+       // markRaw: the menu items land in a reactive array; a bare component
+@@ -1728,6 +1771,21 @@ button {
+   flex-direction: column;
+ }
+ 
++/* Show notes are prose rather than lyrics: they scroll on their own and stay at
++   reading size instead of the large, centred lyric type. */
++.show-notes-wrapper {
++  height: 100%;
++  width: 100%;
++}
++
++.show-notes-content {
++  padding: 0 0.5rem 1rem;
++  font-size: 0.95rem;
++  line-height: 1.6;
++  text-align: start;
++  opacity: 0.9;
++}
++
+ .lyrics-wrapper > :deep(.lyrics-container) {
+   flex: 1 1 auto;
+   min-height: 0;
+diff --git a/src/layouts/default/PlayerOSD/PlayerFullscreenHeaderControls.vue b/src/layouts/default/PlayerOSD/PlayerFullscreenHeaderControls.vue
+index 9eb5f1b..b3a5c1b 100644
+--- a/src/layouts/default/PlayerOSD/PlayerFullscreenHeaderControls.vue
++++ b/src/layouts/default/PlayerOSD/PlayerFullscreenHeaderControls.vue
+@@ -6,46 +6,60 @@
+     <!-- streaming quality details chip (moved up from under the track info) -->
+     <QualityDetailsBtn v-if="hasActiveAudioPath" pill />
+ 
+-    <!-- lyrics: available -> clickable toggle (fully primary while the panel is open) -->
+-    <TooltipProvider v-if="lyricsState === 'available'" :delay-duration="200">
++    <!-- side panel (lyrics or show notes): available -> clickable toggle
++         (fully primary while the panel is open) -->
++    <TooltipProvider
++      v-if="sidePanelState === 'available'"
++      :delay-duration="200"
++    >
+       <Tooltip>
+         <TooltipTrigger as-child>
+           <Button
+             variant="ghost-outline"
+             :size="showLabel ? 'xs' : 'icon-xs'"
+-            :class="[pillClass, lyricsActive ? activePillClass : '']"
+-            :aria-label="$t('lyrics')"
+-            @click="emit('toggle-lyrics')"
++            :class="[pillClass, sidePanelActive ? activePillClass : '']"
++            :aria-label="$t(sidePanelLabel)"
++            @click="emit('toggle-side-panel')"
+           >
+-            <MicVocal :size="16" :class="{ 'mic-singing': lyricsActive }" />
+-            <span v-if="showLabel">{{ $t("lyrics") }}</span>
++            <component
++              :is="sidePanelIcon"
++              :size="16"
++              :class="{
++                'mic-singing': sidePanelActive && sidePanelKind === 'lyrics',
++              }"
++            />
++            <span v-if="showLabel">{{ $t(sidePanelLabel) }}</span>
+           </Button>
+         </TooltipTrigger>
+         <TooltipContent side="bottom" class="z-[10001] max-w-[240px]">
+-          {{ lyricsActive ? $t("lyrics_hide") : $t("lyrics_show") }}
++          {{ sidePanelActive ? $t(closeTooltipKey) : $t(openTooltipKey) }}
+         </TooltipContent>
+       </Tooltip>
+     </TooltipProvider>
+ 
+-    <!-- lyrics: loading or unavailable -> greyed out with an explanatory tooltip -->
+-    <TooltipProvider v-else-if="lyricsState !== 'none'" :delay-duration="200">
++    <!-- side panel: loading or unavailable -> greyed out with an explanatory tooltip -->
++    <TooltipProvider
++      v-else-if="sidePanelState !== 'none'"
++      :delay-duration="200"
++    >
+       <Tooltip>
+         <TooltipTrigger as-child>
+           <Button
+             variant="ghost-outline"
+             :size="showLabel ? 'xs' : 'icon-xs'"
+             :class="['text-muted-foreground cursor-default', pillClass]"
+-            :aria-label="$t('lyrics')"
++            :aria-label="$t(sidePanelLabel)"
+           >
+-            <MicVocal
++            <component
++              :is="sidePanelIcon"
+               :size="16"
+-              :class="lyricsState === 'loading' ? 'animate-pulse' : ''"
++              :class="sidePanelState === 'loading' ? 'animate-pulse' : ''"
+             />
+-            <span v-if="showLabel">{{ $t("lyrics") }}</span>
++            <span v-if="showLabel">{{ $t(sidePanelLabel) }}</span>
+           </Button>
+         </TooltipTrigger>
+         <TooltipContent side="bottom" class="z-[10001] max-w-[240px]">
+-          {{ lyricsTooltip }}
++          {{ sidePanelTooltip }}
+         </TooltipContent>
+       </Tooltip>
+     </TooltipProvider>
+@@ -188,23 +202,40 @@ import {
+ } from "@/plugins/api/helpers";
+ import { $t } from "@/plugins/i18n";
+ import { store } from "@/plugins/store";
+-import { AudioLines, MicVocal } from "@lucide/vue";
++import { AudioLines, MicVocal, ScrollText } from "@lucide/vue";
+ import { computed } from "vue";
+ 
+ const props = defineProps<{
+-  lyricsState?: string;
+-  lyricsActive?: boolean;
++  // which of the two the panel holds for the current item, so the button can
++  // name what it opens rather than always saying "lyrics"
++  sidePanelKind?: "lyrics" | "notes" | null;
++  sidePanelState?: string;
++  sidePanelActive?: boolean;
+ }>();
+ const emit = defineEmits<{
+-  (e: "toggle-lyrics"): void;
++  (e: "toggle-side-panel"): void;
+ }>();
+ 
+-// Explanation shown in the tooltip when lyrics can't be opened (yet).
+-const lyricsTooltip = computed(() =>
+-  props.lyricsState === "loading"
+-    ? $t("lyrics_loading")
+-    : $t("lyrics_unavailable_song"),
++const isNotes = computed(() => props.sidePanelKind === "notes");
++
++const sidePanelIcon = computed(() => (isNotes.value ? ScrollText : MicVocal));
++const sidePanelLabel = computed(() =>
++  isNotes.value ? "show_notes" : "lyrics",
++);
++const openTooltipKey = computed(() =>
++  isNotes.value ? "show_notes_show" : "lyrics_show",
+ );
++const closeTooltipKey = computed(() =>
++  isNotes.value ? "show_notes_hide" : "lyrics_hide",
++);
++
++// Explanation shown in the tooltip when the panel can't be opened (yet).
++const sidePanelTooltip = computed(() => {
++  if (isNotes.value) return $t("show_notes_unavailable_episode");
++  return props.sidePanelState === "loading"
++    ? $t("lyrics_loading")
++    : $t("lyrics_unavailable_song");
++});
+ 
+ const { hasActiveAudioPath } = useActiveAudioPath();
+ 
+diff --git a/src/layouts/default/PlayerOSD/useFullscreenQueue.ts b/src/layouts/default/PlayerOSD/useFullscreenQueue.ts
+index 1004590..cd9c3ef 100644
+--- a/src/layouts/default/PlayerOSD/useFullscreenQueue.ts
++++ b/src/layouts/default/PlayerOSD/useFullscreenQueue.ts
+@@ -33,7 +33,7 @@ import { useDisplay } from "vuetify";
+ 
+ export type QueueItemState = "played" | "playing" | "buffered" | "upcoming";
+ 
+-export function useFullscreenQueue(showLyrics: Ref<boolean>) {
++export function useFullscreenQueue(sidePanelOpen: Ref<boolean>) {
+   const { name } = useDisplay();
+ 
+   // Marquee sync group shared by the (non-playing) hovered rows.
+@@ -336,7 +336,9 @@ export function useFullscreenQueue(showLyrics: Ref<boolean>) {
+   // Focus the now-playing track when the queue list becomes visible.
+   watch(
+     () =>
+-      store.showFullscreenPlayer && store.showQueueItems && !showLyrics.value,
++      store.showFullscreenPlayer &&
++      store.showQueueItems &&
++      !sidePanelOpen.value,
+     (visible) => {
+       if (!visible) return;
+       followCurrent.value = true;
+@@ -354,7 +356,7 @@ export function useFullscreenQueue(showLyrics: Ref<boolean>) {
+         index == null ||
+         !store.showFullscreenPlayer ||
+         !store.showQueueItems ||
+-        showLyrics.value
++        sidePanelOpen.value
+       )
+         return;
+       if (followCurrent.value) nextTick(() => focusCurrent("smooth"));
+@@ -392,7 +394,7 @@ export function useFullscreenQueue(showLyrics: Ref<boolean>) {
+       if (
+         store.showFullscreenPlayer &&
+         store.showQueueItems &&
+-        !showLyrics.value
++        !sidePanelOpen.value
+       ) {
+         followCurrent.value = true;
+         nextTick(() => requestAnimationFrame(() => focusCurrent("auto")));
+diff --git a/src/translations/en.json b/src/translations/en.json
+index 2551a44..a37e227 100644
+--- a/src/translations/en.json
++++ b/src/translations/en.json
+@@ -2201,6 +2201,8 @@
+     "crossfade_active_with_smart": "Crossfade is active with smart fades.",
+     "crossfade_smart_active": "The fade timing is chosen automatically to suit each track.",
+     "lyrics": "Lyrics",
++    "show_notes": "Show notes",
++    "show_notes_unavailable_episode": "This episode came without show notes.",
+     "lyrics_unavailable_song": "There are no lyrics available for this track (yet).",
+     "lyrics_unavailable_content": "Lyrics are not available for this media type.",
+     "autoplay_enable": "Enable Autoplay",
+@@ -2219,6 +2221,8 @@
+     "queue_reorder": "Drag to reorder",
+     "lyrics_show": "Show lyrics for this track",
+     "lyrics_hide": "Hide lyrics for this track",
++    "show_notes_show": "Show the notes for this episode",
++    "show_notes_hide": "Hide the notes for this episode",
+     "lyrics_loading": "Lyrics are being fetched...",
+     "show_audio_chain_details": "Show audio pipeline details",
+     "show_less": "Show less",
+diff --git a/tests/helpers/markdown.test.ts b/tests/helpers/markdown.test.ts
+index 6c57167..ec56730 100644
+--- a/tests/helpers/markdown.test.ts
++++ b/tests/helpers/markdown.test.ts
+@@ -5,7 +5,7 @@
+  * discards elements it should keep (lists, the leading paragraph), which would
+  * make every assertion below meaningless.
+  */
+-import { markdownToHtml } from "@/helpers/utils";
++import { markdownToHtml, markdownToPlainText } from "@/helpers/utils";
+ import { describe, expect, it, vi } from "vitest";
+ 
+ vi.mock("@/plugins/api", () => ({ api: {} }));
+@@ -73,3 +73,37 @@ describe("markdownToHtml", () => {
+     );
+   });
+ });
++
++describe("markdownToPlainText", () => {
++  it("drops the markup a podcast feed wraps its show notes in", () => {
++    expect(
++      markdownToPlainText('<p dir="ltr">Just hours after we dropped it</p>'),
++    ).toBe("Just hours after we dropped it");
++  });
++
++  it("decodes character entities rather than showing them", () => {
++    expect(markdownToPlainText("audio marked &#34;prison&#34;")).toBe(
++      'audio marked "prison"',
++    );
++    expect(markdownToPlainText("now that he&#39;s retired")).toBe(
++      "now that he's retired",
++    );
++  });
++
++  it("collapses paragraphs into one line", () => {
++    expect(markdownToPlainText("<p>first</p><p>second</p>")).toBe(
++      "first second",
++    );
++  });
++
++  it("keeps the text of inline emphasis", () => {
++    expect(markdownToPlainText("<em>Music in this episode</em>")).toBe(
++      "Music in this episode",
++    );
++  });
++
++  it("yields nothing for markup that carries no text", () => {
++    expect(markdownToPlainText("<script>alert(1)</script>")).toBe("");
++    expect(markdownToPlainText("")).toBe("");
++  });
++});
+diff --git a/tests/layouts/PlayerFullscreen.test.ts b/tests/layouts/PlayerFullscreen.test.ts
+index 04d4759..0f7b298 100644
+--- a/tests/layouts/PlayerFullscreen.test.ts
++++ b/tests/layouts/PlayerFullscreen.test.ts
+@@ -168,7 +168,11 @@ interface TestStore {
+     name?: string;
+     media_item?: {
+       media_type: MediaType;
+-      metadata?: { chapters?: Chapter[] };
++      metadata?: {
++        chapters?: Chapter[];
++        lyrics?: string;
++        description?: string;
++      };
+     };
+   };
+   showFullscreenPlayer: boolean;
+@@ -345,6 +349,15 @@ describe("PlayerFullscreen lyrics clock", () => {
+     await seedPlayingQueue();
+     const { store } = await import("@/plugins/store");
+     const testStore = store as unknown as TestStore;
++    // the clock follows lyric timestamps, so it only has a job on a track -
++    // and only one that has lyrics, since the panel closes itself otherwise
++    testStore.curQueueItem = {
++      queue_item_id: "item-1",
++      media_item: {
++        media_type: MediaType.TRACK,
++        metadata: { lyrics: "a line" },
++      },
++    };
+ 
+     wrapper = shallowMount(PlayerFullscreen, {
+       props: { colorPalette: EMPTY_COLOR_PALETTE },
+@@ -359,11 +372,11 @@ describe("PlayerFullscreen lyrics clock", () => {
+     // Open, but showing the queue rather than the lyrics.
+     expect(pendingFrames.size).toBe(0);
+ 
+-    // The lyrics toggle lives on a header button inside the dialog, which a
++    // The panel toggle lives on a header button inside the dialog, which a
+     // shallow mount does not render, so the panel is opened through the binding
+     // that button drives.
+-    const vm = wrapper.vm as unknown as { showLyrics: boolean };
+-    vm.showLyrics = true;
++    const vm = wrapper.vm as unknown as { showSidePanel: boolean };
++    vm.showSidePanel = true;
+     await nextTick();
+     expect(pendingFrames.size).toBe(1);
+ 
+@@ -371,6 +384,58 @@ describe("PlayerFullscreen lyrics clock", () => {
+     await nextTick();
+     expect(pendingFrames.size).toBe(0);
+   });
++
++  it("stays idle for a podcast episode's show notes", async () => {
++    await seedPlayingQueue();
++    const { store } = await import("@/plugins/store");
++    const testStore = store as unknown as TestStore;
++    // show notes are prose: they do not follow the playhead, so the ~60fps loop
++    // must not start for them the way it does for lyrics
++    testStore.curQueueItem = {
++      queue_item_id: "item-1",
++      media_item: {
++        media_type: MediaType.PODCAST_EPISODE,
++        metadata: { description: "What this episode is about" },
++      },
++    };
++
++    wrapper = shallowMount(PlayerFullscreen, {
++      props: { colorPalette: EMPTY_COLOR_PALETTE },
++    });
++    testStore.showFullscreenPlayer = true;
++    await nextTick();
++
++    const vm = wrapper.vm as unknown as {
++      showSidePanel: boolean;
++      sidePanelKind: string | null;
++      sidePanelState: string;
++    };
++    vm.showSidePanel = true;
++    await nextTick();
++
++    expect(vm.sidePanelKind).toBe("notes");
++    expect(vm.sidePanelState).toBe("available");
++    expect(pendingFrames.size).toBe(0);
++  });
++
++  it("offers nothing for an episode that came without show notes", async () => {
++    await seedPlayingQueue();
++    const { store } = await import("@/plugins/store");
++    const testStore = store as unknown as TestStore;
++    testStore.curQueueItem = {
++      queue_item_id: "item-1",
++      media_item: { media_type: MediaType.PODCAST_EPISODE, metadata: {} },
++    };
++
++    wrapper = shallowMount(PlayerFullscreen, {
++      props: { colorPalette: EMPTY_COLOR_PALETTE },
++    });
++    testStore.showFullscreenPlayer = true;
++    await nextTick();
++
++    const vm = wrapper.vm as unknown as { sidePanelState: string };
++    expect(vm.sidePanelState).toBe("unavailable-song");
++  });
+ });
+ 
+ describe("PlayerFullscreen player select button", () => {
+-- 
+2.43.0
+

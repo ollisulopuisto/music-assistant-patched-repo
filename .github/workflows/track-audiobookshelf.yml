@@ -1,0 +1,163 @@
+---
+name: Track Audiobookshelf releases
+
+# The Audiobookshelf add-on installs upstream's own image, so there is nothing to
+# build - keeping it current is only a matter of pointing config.yaml at a newer
+# tag. This does that, which is what makes Home Assistant offer the update.
+#
+# Bumping the file only OFFERS the update; the Supervisor never installs it on its
+# own. So this is deliberately allowed to run unattended: the human decision is
+# still the one that matters, it just gets surfaced instead of missed.
+
+on:
+  schedule:
+    # daily, 05:23 UTC. Off the hour, and after the Monday Music Assistant build
+    # so the two never race for the same push.
+    - cron: "23 5 * * *"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Pin a specific Audiobookshelf tag instead of the newest"
+        required: false
+        type: string
+
+permissions:
+  contents: write
+  issues: write
+
+concurrency:
+  group: track-audiobookshelf
+  cancel-in-progress: false
+
+env:
+  UPSTREAM_IMAGE: advplyr/audiobookshelf
+  ADDON_CONFIG: audiobookshelf/config.yaml
+
+jobs:
+  track:
+    name: Point the add-on at the newest release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Find the newest release, and check it can actually be installed
+        id: pick
+        env:
+          REQUESTED: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          token=$(curl -fsSL \
+            "https://ghcr.io/token?scope=repository:${UPSTREAM_IMAGE}:pull&service=ghcr.io" \
+            | python3 -c "import sys,json;print(json.load(sys.stdin)['token'])")
+
+          if [ -n "$REQUESTED" ]; then
+            latest="$REQUESTED"
+          else
+            # strict x.y.z only: upstream also publishes branch and prerelease tags,
+            # and this add-on is somebody's audiobook library, not a testbed
+            latest=$(curl -fsSL -H "Authorization: Bearer $token" \
+              "https://ghcr.io/v2/${UPSTREAM_IMAGE}/tags/list?n=1000" \
+              | python3 -c "
+          import sys, json, re
+          tags = [t for t in json.load(sys.stdin).get('tags', []) if re.fullmatch(r'\d+\.\d+\.\d+', t)]
+          if not tags:
+              raise SystemExit('no release tags found upstream')
+          print(sorted(tags, key=lambda s: [int(p) for p in s.split('.')])[-1])
+          ")
+          fi
+
+          current=$(sed -n 's/^version:[[:space:]]*//p' "$ADDON_CONFIG" | head -1 | tr -d "\"' \t\r")
+          echo "current=$current  latest=$latest"
+          if [ "$current" = "$latest" ]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "already on $current"
+            exit 0
+          fi
+
+          # The Supervisor pulls one tag and picks its own architecture. Offering an
+          # update to a tag that serves only one of them is worse than offering none,
+          # so the tag is checked before config.yaml is touched.
+          archs=$(curl -fsSL -H "Authorization: Bearer $token" \
+            -H "Accept: application/vnd.oci.image.index.v1+json,application/vnd.docker.distribution.manifest.list.v2+json" \
+            "https://ghcr.io/v2/${UPSTREAM_IMAGE}/manifests/${latest}" \
+            | python3 -c "
+          import sys, json
+          d = json.load(sys.stdin)
+          print(' '.join(sorted({m['platform']['architecture'] for m in d.get('manifests', [])})))
+          ")
+          echo "architectures in ${latest}: ${archs}"
+          for want in amd64 arm64; do
+            case " $archs " in
+              *" $want "*) ;;
+              *) echo "tag ${latest} does not serve ${want}; refusing to offer it" >&2; exit 1 ;;
+            esac
+          done
+
+          echo "latest=$latest" >> "$GITHUB_OUTPUT"
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+
+      - name: Bump the add-on
+        if: steps.pick.outputs.changed == 'true'
+        env:
+          LATEST: ${{ steps.pick.outputs.latest }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os
+          import pathlib
+          import re
+
+          path = pathlib.Path(os.environ["ADDON_CONFIG"])
+          text, count = re.subn(
+              r'(?m)^version:.*$', f'version: "{os.environ["LATEST"]}"', path.read_text()
+          )
+          if count != 1:
+              raise SystemExit(f"expected 1 version line in the add-on config, found {count}")
+          path.write_text(text)
+          PY
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "$ADDON_CONFIG"
+          git commit -m "Offer Audiobookshelf $LATEST"
+          git push
+
+  report-failure:
+    name: Report a broken tracker
+    needs: track
+    if: failure()
+    runs-on: ubuntu-latest
+    steps:
+      # Same reasoning as the Music Assistant build: a tracker that quietly stops
+      # tracking is worse than one that breaks loudly, because nothing looks wrong.
+      - uses: actions/github-script@v9
+        with:
+          script: |
+            const title = "Audiobookshelf release tracking is failing";
+            const url = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}` +
+              `/actions/runs/${context.runId}`;
+            const body = [
+              `Tracking Audiobookshelf releases failed: ${url}`,
+              "",
+              "The add-on was **not** bumped, so the installed version stays put.",
+              "Usually either upstream changed how it tags releases, or the newest",
+              "tag does not serve both architectures yet - the run log says which.",
+            ].join("\n");
+            const { owner, repo } = context.repo;
+            const existing = await github.paginate(github.rest.issues.listForRepo, {
+              owner, repo, state: "all", labels: "build-failure", per_page: 100,
+            });
+            const issue = existing.find((i) => i.title === title);
+            if (!issue) {
+              await github.rest.issues.create({
+                owner, repo, title, body, labels: ["build-failure"],
+              });
+              return;
+            }
+            if (issue.state === "closed") {
+              await github.rest.issues.update({
+                owner, repo, issue_number: issue.number, state: "open",
+              });
+            }
+            await github.rest.issues.createComment({
+              owner, repo, issue_number: issue.number, body,
+            });

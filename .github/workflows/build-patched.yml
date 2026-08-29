@@ -1,85 +1,487 @@
-name: Build Patched Music Assistant
+---
+name: Build patched add-on
+
+# Rebuilds the Home Assistant add-on from the newest upstream Music Assistant
+# stable release with the patches in patches/ applied, and points the add-on at
+# the result.
+#
+# It lives in this repository rather than in the server fork because a `schedule`
+# trigger only fires for a workflow file on a repository's DEFAULT branch, and
+# this repository's default branch is the one the add-on is served from anyway.
+#
+# Two properties are worth keeping when editing this:
+#
+#  1. A patch that stops applying fails the build BEFORE anything is published,
+#     and config.yaml is bumped last. Upstream reworking the Pocket Casts
+#     provider therefore leaves the last good image installed and running,
+#     never a half-patched one.
+#  2. A failure is reported as an issue. The workflow this replaced failed every
+#     night for three months without anyone noticing, which is the real hazard
+#     with a pipeline like this - not the breakage, the silence.
 
 on:
-  push:
-    branches:
-      - main
   schedule:
-    - cron: '0 0 * * *' # Check daily at midnight
-  workflow_dispatch:   # Allow manual trigger
+    # Daily, 04:17 UTC. Off the hour so it does not queue behind everyone else.
+    #
+    # Daily rather than weekly because nothing here reacts to an upstream release:
+    # a new stable tag fires no event in this repository, so the schedule is the
+    # only thing that notices one. Weekly meant running up to six days behind
+    # upstream. A run that finds nothing new exits in the resolve step below
+    # without building, so the cost of checking daily is a few seconds of runner.
+    - cron: "17 4 * * *"
+  workflow_dispatch:
+    inputs:
+      server_ref:
+        description: "Server tag/branch to build (default: newest stable release tag)"
+        required: false
+        type: string
+      force:
+        description: "Rebuild even when this upstream version was already built"
+        required: false
+        type: boolean
+        default: false
+  push:
+    branches: [main]
+    # a changed patch means a changed image, so republish without waiting for the
+    # next daily run. Editing this workflow usually does not change the image, and
+    # the no-op guard below only exempts scheduled runs - so a workflow edit would
+    # publish a new version that is byte-identical to the last. Use the manual
+    # dispatch, with force, when a workflow change really does need a rebuild.
+    paths:
+      - "patches/**"
+
+permissions:
+  contents: write
+  packages: write
+  issues: write
+
+concurrency:
+  group: build-patched
+  cancel-in-progress: false
+
+env:
+  SERVER_REPO: music-assistant/server
+  IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/ma-server-patched
+  ADDON_CONFIG: music-assistant-upnext-test/config.yaml
+  # must match the base image the built ref's Dockerfile expects (see its release.yml)
+  BASE_IMAGE_VERSION: "1.6.3"
 
 jobs:
-  check-and-build:
+  resolve:
+    name: Resolve upstream version
     runs-on: ubuntu-latest
-    permissions:
-      packages: write
-      contents: read
-    env:
-      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-
+    outputs:
+      server_ref: ${{ steps.pick.outputs.server_ref }}
+      version: ${{ steps.pick.outputs.version }}
+      wheel_version: ${{ steps.pick.outputs.wheel_version }}
+      changed: ${{ steps.pick.outputs.changed }}
     steps:
-      - name: Get latest release tag
-        id: upstream
-        run: |
-          TAG=$(curl -s https://api.github.com/repos/music-assistant/server/releases/latest | jq -r .tag_name)
-          echo "tag=$TAG" >> $GITHUB_OUTPUT
-          # Strip the 'v' from tag for version string
-          VERSION=${TAG#v}
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
+      - uses: actions/checkout@v5
 
-      - name: Checkout upstream code
-        uses: actions/checkout@v4
+      - name: Pick the upstream ref and the version to publish
+        id: pick
+        env:
+          REQUESTED: ${{ inputs.server_ref }}
+          FORCE: ${{ inputs.force }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          if [ -n "$REQUESTED" ]; then
+            server_ref="$REQUESTED"
+          else
+            # newest x.y.z tag; rc and dev tags carry a suffix and the anchors exclude them
+            server_ref=$(git ls-remote --tags --refs --sort=-v:refname \
+                "https://github.com/${SERVER_REPO}" \
+              | sed -n 's#.*refs/tags/##p' \
+              | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' \
+              | head -1)
+          fi
+          if [ -z "$server_ref" ]; then
+            echo "could not resolve an upstream release tag" >&2
+            exit 1
+          fi
+
+          # The published version is the upstream one plus our own counter, so it sorts
+          # above the upstream release and says on its face what it was built from.
+          current=$(sed -n 's/^version:[[:space:]]*//p' "$ADDON_CONFIG" | head -1 | tr -d "\"' \t\r")
+          base="${server_ref}-upnext"
+          counter=1
+          if [ "${current%.*}" = "$base" ]; then
+            # same upstream release as last time: only a patch change warrants a rebuild
+            if [ "$FORCE" != "true" ] && [ "$EVENT" = "schedule" ]; then
+              echo "changed=false" >> "$GITHUB_OUTPUT"
+              echo "$current is already built from $server_ref; nothing to do"
+              exit 0
+            fi
+            counter=$(( ${current##*.} + 1 ))
+          fi
+
+          # Two spellings of the same version, because the two namespaces disagree:
+          # a Docker tag cannot contain '+', and PEP 440 will not accept '-upnext.1'.
+          # The Python one is a local version, which is precisely the notion of "this
+          # upstream release plus local modifications".
+          echo "server_ref=$server_ref" >> "$GITHUB_OUTPUT"
+          echo "version=${server_ref}-upnext.${counter}" >> "$GITHUB_OUTPUT"
+          echo "wheel_version=${server_ref}+upnext.${counter}" >> "$GITHUB_OUTPUT"
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+          echo "Building ${base}.${counter} from upstream $server_ref"
+
+  frontend:
+    name: Build the patched frontend wheel
+    needs: resolve
+    if: needs.resolve.outputs.changed == 'true'
+    runs-on: ubuntu-latest
+    outputs:
+      pinned: ${{ steps.pin.outputs.version }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Read the frontend version the server pins
+        id: pin
+        run: |
+          set -euo pipefail
+          # the pin is the contract between the two repos; building any other version
+          # risks a frontend speaking an API this server does not
+          curl -fsSL \
+            "https://raw.githubusercontent.com/${SERVER_REPO}/${{ needs.resolve.outputs.server_ref }}/requirements_all.txt" \
+            -o requirements_all.txt
+          pinned=$(sed -n 's/^music-assistant-frontend==//p' requirements_all.txt | head -1 | tr -d '\r')
+          if [ -z "$pinned" ]; then
+            echo "no music-assistant-frontend pin found in the server's requirements" >&2
+            exit 1
+          fi
+          echo "version=$pinned" >> "$GITHUB_OUTPUT"
+          echo "Server pins frontend $pinned"
+
+      - name: Check out the frontend at that version
+        uses: actions/checkout@v5
+        with:
+          repository: music-assistant/frontend
+          ref: ${{ steps.pin.outputs.version }}
+          path: frontend
+
+      - name: Apply the frontend patches
+        working-directory: frontend
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          for patch in ../patches/frontend/*.patch; do
+            echo "::group::$(basename "$patch")"
+            # deliberately not --3way: the blobs it would need are absent from a tag
+            # checkout, and a silent fallback to a fuzzy apply is the one outcome to avoid
+            git apply --verbose "$patch"
+            echo "::endgroup::"
+          done
+
+      - uses: pnpm/action-setup@v4
+        with:
+          # the pnpm version comes from the frontend's own packageManager field;
+          # this repository's root has no package.json for the action to read
+          package_json_file: frontend/package.json
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+
+      - name: Build and check the bundle
+        working-directory: frontend
+        run: |
+          set -euo pipefail
+          pnpm install --frozen-lockfile
+          pnpm exec vue-tsc --noEmit
+          pnpm exec vite build
+
+      - name: Build the wheel
+        working-directory: frontend
+        env:
+          PINNED: ${{ steps.pin.outputs.version }}
+        run: |
+          set -euo pipefail
+          # keep the pinned version number: the server's own metadata asks for exactly
+          # this one, and anything else gets resolved away again
+          python -m pip install --upgrade build
+          python - <<'PY'
+          import os
+          import pathlib
+          import re
+
+          path = pathlib.Path("pyproject.toml")
+          text, count = re.subn(
+              r'(?m)^version = "0\.0\.0"$',
+              f'version = "{os.environ["PINNED"]}"',
+              path.read_text(),
+          )
+          if count != 1:
+              raise SystemExit(f"expected 1 version placeholder, found {count}")
+          path.write_text(text)
+          PY
+          python -m build --wheel --outdir ../frontend-dist
+          ls -l ../frontend-dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: frontend-wheel
+          path: frontend-dist/*.whl
+          retention-days: 1
+
+  verify:
+    name: Test the patched tree
+    needs: resolve
+    if: needs.resolve.outputs.changed == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Check out the upstream server release
+        uses: actions/checkout@v5
         with:
           repository: music-assistant/server
-          ref: ${{ steps.upstream.outputs.tag }}
-          path: upstream
-          fetch-depth: 0
+          ref: ${{ needs.resolve.outputs.server_ref }}
+          path: source
 
-      - name: Checkout this repo (for the patch)
-        uses: actions/checkout@v4
+      - name: Apply the server patches
+        working-directory: source
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          for patch in ../patches/server/*.patch; do
+            echo "::group::$(basename "$patch")"
+            git apply --verbose "$patch"
+            echo "::endgroup::"
+          done
+
+      - uses: actions/setup-python@v6
         with:
-          path: patch-repo
+          python-version-file: source/.python-version
 
-      - name: Apply Patch
-        working-directory: upstream
+      - name: Install
+        working-directory: source
         run: |
-          git config --global user.email "action@github.com"
-          git config --global user.name "GitHub Action"
-          git fetch --tags
-          git apply --3way --ignore-whitespace ../patch-repo/variable_playback.patch
+          set -euo pipefail
+          # upstream's own recipe (see its .github/workflows/test.yml): requirements_all
+          # carries the --extra-index-url that resolves torch to the small CPU wheel,
+          # which pyproject's bare pin would otherwise turn into a multi-gigabyte one
+          pip install uv
+          uv pip install --system --index-strategy unsafe-best-match \
+            . .[test] -r requirements_all.txt
 
-      - name: Modify Dockerfile to build from source
-        working-directory: upstream
+      - name: Run the provider's tests
+        working-directory: source
         run: |
-          # Remove the ADD dist dist line
-          sed -i 's/^ADD dist dist/# ADD dist dist/' Dockerfile
-          
-          # Replace the prebuilt wheel install with source install
-          # We use a marker to find the right place and replace the entire section
-          sed -i '/# Install Music Assistant from prebuilt wheel/,/whl"/c\# Install Music Assistant from source\nCOPY . /app/source\nRUN uv pip install /app/source' Dockerfile
-          
-          # Fix the bytecode compilation path - it should still work if music_assistant is in site-packages
-          # But let's make sure it doesn't fail if the path is slightly different
-          sed -i 's|/site-packages/music_assistant|/site-packages|' Dockerfile
+          set -euo pipefail
+          # a patch can apply cleanly to a refactored provider and still be wrong for it;
+          # publishing an image whose provider is quietly broken is worse than publishing
+          # nothing. Architecture-independent, so this runs once rather than per-arch.
+          python -m pytest tests/providers/pocketcasts -q
 
-      - name: Log in to GHCR
-        uses: docker/login-action@v3
+  build:
+    name: Build ${{ matrix.arch }}
+    needs: [resolve, frontend, verify]
+    if: needs.resolve.outputs.changed == 'true'
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      # one architecture failing should not throw away the other
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Check out the upstream server release
+        uses: actions/checkout@v5
+        with:
+          repository: music-assistant/server
+          ref: ${{ needs.resolve.outputs.server_ref }}
+          path: source
+
+      - name: Apply the server patches
+        working-directory: source
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          for patch in ../patches/server/*.patch; do
+            echo "::group::$(basename "$patch")"
+            git apply --verbose "$patch"
+            echo "::endgroup::"
+          done
+          git --no-pager diff --stat
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version-file: source/.python-version
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: frontend-wheel
+          path: source/dist
+
+      - name: Stamp the version and build the server wheel
+        working-directory: source
+        env:
+          VERSION: ${{ needs.resolve.outputs.wheel_version }}
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import os
+          import pathlib
+          import re
+
+          path = pathlib.Path("pyproject.toml")
+          text, count = re.subn(
+              r'(?m)^version = "0\.0\.0"$',
+              f'version = "{os.environ["VERSION"]}"',
+              path.read_text(),
+          )
+          if count != 1:
+              raise SystemExit(f"expected 1 version placeholder in pyproject.toml, found {count}")
+          path.write_text(text)
+          PY
+          python -m pip install --upgrade build
+          python -m build --wheel --outdir dist
+          ls -l dist
+
+      - uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@v4
 
-      - name: Build and Push Patched Image
-        uses: docker/build-push-action@v6
+      - name: Build and push the per-architecture image
+        uses: docker/build-push-action@v7
         with:
-          context: ./upstream
-          platforms: linux/amd64,linux/arm64
+          context: source
+          file: source/Dockerfile
+          platforms: linux/${{ matrix.arch }}
           push: true
-          tags: |
-            ghcr.io/${{ github.repository_owner }}/music-assistant-server:latest
-            ghcr.io/${{ github.repository_owner }}/music-assistant-server:${{ steps.upstream.outputs.tag }}
+          # attestations turn the tag into an index the Supervisor cannot resolve
+          provenance: false
+          sbom: false
+          tags: ${{ env.IMAGE_NAME }}:${{ needs.resolve.outputs.version }}-${{ matrix.arch }}
           build-args: |
-            MASS_VERSION=${{ steps.upstream.outputs.version }}
+            BASE_IMAGE_VERSION=${{ env.BASE_IMAGE_VERSION }}
+            MASS_VERSION=${{ needs.resolve.outputs.wheel_version }}
+          cache-from: type=gha,scope=${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.arch }}
+
+  publish:
+    name: Publish the tag and point the add-on at it
+    needs: [resolve, build]
+    if: needs.resolve.outputs.changed == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # The Supervisor pulls one tag and picks the architecture itself, so the two
+      # per-arch images are joined under the plain version tag config.yaml names.
+      # Both must exist: this is a daily driver, and a tag serving one architecture
+      # is a broken update for whoever runs the other.
+      - name: Join the per-architecture images under one tag
+        env:
+          VERSION: ${{ needs.resolve.outputs.version }}
+        run: |
+          set -euo pipefail
+          sources=""
+          for arch in amd64 arm64; do
+            image="${IMAGE_NAME}:${VERSION}-${arch}"
+            if ! docker buildx imagetools inspect "$image" >/dev/null 2>&1; then
+              echo "missing $arch image for $VERSION; refusing to publish a partial tag" >&2
+              exit 1
+            fi
+            sources="$sources $image"
+          done
+          # shellcheck disable=SC2086
+          docker buildx imagetools create --tag "${IMAGE_NAME}:${VERSION}" $sources
+          docker buildx imagetools inspect "${IMAGE_NAME}:${VERSION}"
+
+      # Home Assistant shows CHANGELOG.md verbatim in the update dialog, and it is
+      # the only thing a user sees before accepting an update. Written here rather
+      # than by hand so it cannot drift from what was actually built.
+      - name: Write the changelog entry
+        env:
+          VERSION: ${{ needs.resolve.outputs.version }}
+          SERVER_REF: ${{ needs.resolve.outputs.server_ref }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          python scripts/changelog.py --version "$VERSION" --server-ref "$SERVER_REF"
+
+      - name: Point the add-on at the new image
+        env:
+          VERSION: ${{ needs.resolve.outputs.version }}
+          SERVER_REF: ${{ needs.resolve.outputs.server_ref }}
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import os
+          import pathlib
+          import re
+
+          path = pathlib.Path(os.environ["ADDON_CONFIG"])
+          text, count = re.subn(
+              r'(?m)^version:.*$', f'version: "{os.environ["VERSION"]}"', path.read_text()
+          )
+          if count != 1:
+              raise SystemExit(f"expected 1 version line in the add-on config, found {count}")
+          path.write_text(text)
+          PY
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "$ADDON_CONFIG" "$(dirname "$ADDON_CONFIG")/CHANGELOG.md"
+          git commit -m "Publish $VERSION (upstream $SERVER_REF)"
+          git push
+
+  report-failure:
+    name: Report a broken build
+    needs: [resolve, frontend, build, publish]
+    if: failure()
+    runs-on: ubuntu-latest
+    steps:
+      # The workflow this replaced failed nightly for three months in silence. An
+      # issue is the cheapest thing that actually reaches someone; it is reopened
+      # and updated rather than duplicated, so a long breakage stays one thread.
+      - uses: actions/github-script@v9
+        with:
+          script: |
+            const title = "Patched add-on build is failing";
+            const url = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}` +
+              `/actions/runs/${context.runId}`;
+            const body = [
+              `The patched add-on build failed: ${url}`,
+              "",
+              "The add-on config was **not** bumped, so the last good image stays",
+              "installed and running. Most likely a patch in `patches/` no longer",
+              "applies to the upstream release being built - check the \"Apply the",
+              "... patches\" step, re-roll the patch against that release, and push.",
+            ].join("\n");
+            const { owner, repo } = context.repo;
+            const existing = await github.paginate(github.rest.issues.listForRepo, {
+              owner, repo, state: "all", labels: "build-failure", per_page: 100,
+            });
+            const issue = existing.find((i) => i.title === title);
+            if (!issue) {
+              await github.rest.issues.create({
+                owner, repo, title, body, labels: ["build-failure"],
+              });
+              return;
+            }
+            if (issue.state === "closed") {
+              await github.rest.issues.update({
+                owner, repo, issue_number: issue.number, state: "open",
+              });
+            }
+            await github.rest.issues.createComment({
+              owner, repo, issue_number: issue.number, body,
+            });

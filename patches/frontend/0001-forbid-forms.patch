@@ -1,0 +1,52 @@
+From e264654e58e176c7b9a168b096a74b05ecd508b9 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 27 Aug 2026 21:40:45 +0000
+Subject: [PATCH] Refuse to render form controls from metadata markdown
+
+DOMPurify's default allowlist keeps form elements, so a feed-supplied
+<form action=...> survived sanitisation as a working form - a phishing box
+posting wherever its author pointed it, no script needed. Descriptions are
+prose; there is no legitimate form in them to lose.
+---
+ src/helpers/utils.ts           |  3 +++
+ tests/helpers/markdown.test.ts | 10 ++++++++++
+ 2 files changed, 13 insertions(+)
+
+diff --git a/src/helpers/utils.ts b/src/helpers/utils.ts
+index 6e75012..01ec94d 100644
+--- a/src/helpers/utils.ts
++++ b/src/helpers/utils.ts
+@@ -676,6 +676,9 @@ export const markdownToHtml = function (text: string): string {
+   // Metadata can carry attacker-controlled HTML that reaches v-html; SANITIZE_NAMED_PROPS also blocks DOM clobbering
+   return markdownPurifier.sanitize(marked(source, { breaks: true }) as string, {
+     SANITIZE_NAMED_PROPS: true,
++    // DOMPurify's default allowlist keeps form controls, and a feed-supplied
++    // <form> posting to an attacker's URL is a phishing box, not formatting
++    FORBID_TAGS: ["form", "input", "button", "select", "textarea", "dialog"],
+   });
+ };
+ 
+diff --git a/tests/helpers/markdown.test.ts b/tests/helpers/markdown.test.ts
+index 6c57167..ee71fc0 100644
+--- a/tests/helpers/markdown.test.ts
++++ b/tests/helpers/markdown.test.ts
+@@ -25,6 +25,16 @@ describe("markdownToHtml", () => {
+     expect(html).not.toContain("<script>");
+   });
+ 
++  it("refuses to render a form", () => {
++    // a feed-supplied form posting elsewhere is a phishing box; DOMPurify's
++    // default allowlist would let it through
++    const html = markdownToHtml(
++      '<form action="https://evil.example"><input name="password"></form>',
++    );
++    expect(html).not.toContain("<form");
++    expect(html).not.toContain("<input");
++  });
++
+   it("drops a javascript: link", () => {
+     expect(markdownToHtml("[x](javascript:alert(1))")).not.toContain(
+       "javascript:",
+-- 
+2.43.0
+
