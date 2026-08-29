@@ -1,0 +1,30 @@
+name: "Audiobookshelf"
+version: "v2.36.0"
+slug: "audiobookshelf"
+description: "Self-hosted audiobook and podcast server, with server-side progress"
+url: "https://www.audiobookshelf.org"
+arch:
+  - aarch64
+  - amd64
+  - armv7
+image: "ghcr.io/advplyr/audiobookshelf"
+init: false
+map:
+  - config:rw
+  - share:rw
+  - media:rw
+ports:
+  80/tcp: 13378
+ports_description:
+  80/tcp: "Audiobookshelf Web UI and API"
+environment:
+  CONFIG_PATH: "/config"
+  METADATA_PATH: "/config/metadata"
+options:
+  AUDIOBOOKSHELF_UID: 0
+  AUDIOBOOKSHELF_GID: 0
+schema:
+  AUDIOBOOKSHELF_UID: int?
+  AUDIOBOOKSHELF_GID: int?
+panel_icon: "mdi:bookshelf"
+panel_title: "Audiobookshelf"
