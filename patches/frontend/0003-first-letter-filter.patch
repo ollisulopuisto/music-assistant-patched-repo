@@ -1,0 +1,537 @@
+From 2fa1f6156fd42e6cd64930387f2480657c77ffb3 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Wed, 23 Sep 2026 20:56:31 +0000
+Subject: [PATCH] Offer a jump to a first letter in every library listing
+
+Scrolling is currently the only way through a library listing, which pages 50
+items at a time - reaching T in a few thousand artists means dozens of loads,
+and the search box matches anywhere in a name so it cannot stand in for one.
+
+Every library view gains a toolbar entry listing A-Z plus '#' for the items
+filed under no letter, so the whole alphabet is one click away and the buckets
+between them reach every item. Choosing the letter already showing clears it,
+like the other toggle filters.
+
+The letter is sent to the server, which files items by whichever name the
+current sort uses - so the letters keep agreeing with the order on screen when
+you switch between name and sort name.
+
+The count endpoints take no letter, so a letter-filtered listing reports no
+total rather than the whole library's, the same way a provider-filtered one
+already does. Checked before the cached store count, which would otherwise be
+returned for a narrowed list.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01VpS6zTXcRdworxLZ6Dp1De
+---
+ src/components/ItemsListing.vue | 45 +++++++++++++++++++++++++++++++++
+ src/plugins/api/index.ts        | 15 +++++++++++
+ src/translations/en.json        |  1 +
+ src/views/LibraryAlbums.vue     |  9 +++++++
+ src/views/LibraryArtists.vue    |  9 +++++++
+ src/views/LibraryAudiobooks.vue | 10 ++++++++
+ src/views/LibraryGenres.vue     |  2 ++
+ src/views/LibraryPlaylists.vue  |  9 +++++++
+ src/views/LibraryPodcasts.vue   |  9 +++++++
+ src/views/LibraryRadios.vue     |  9 +++++++
+ src/views/LibraryTracks.vue     |  9 +++++++
+ 11 files changed, 127 insertions(+)
+
+diff --git a/src/components/ItemsListing.vue b/src/components/ItemsListing.vue
+index 0786838..d131cc6 100644
+--- a/src/components/ItemsListing.vue
++++ b/src/components/ItemsListing.vue
+@@ -328,6 +328,7 @@ import {
+ import { eventbus } from "@/plugins/eventbus";
+ import { store } from "@/plugins/store";
+ import {
++  ArrowDownAZ,
+   ArrowUpDown,
+   CheckCheck,
+   ChevronDown,
+@@ -375,12 +376,23 @@ export interface ToolBarTab {
+   loadPagedData?: LoadPagedDataFn;
+ }
+ 
++// The buckets the first-letter filter offers. "#" collects everything the server files
++// under no letter - names starting with a digit, and names like "!!!" that reduce to
++// nothing once punctuation is stripped - so the strip as a whole reaches every item.
++const FIRST_LETTER_OTHER = "#";
++const FIRST_LETTER_BUCKETS = [
++  FIRST_LETTER_OTHER,
++  ..."ABCDEFGHIJKLMNOPQRSTUVWXYZ",
++];
++
+ export interface LoadDataParams {
+   offset: number;
+   limit: number;
+   sortBy: string;
+   search: string;
+   genreIds?: number | number[];
++  // a single letter, or "#" for the items filed under no letter at all
++  startsWith?: string;
+   favoritesOnly?: boolean;
+   albumArtistsFilter?: boolean;
+   libraryOnly?: boolean;
+@@ -433,6 +445,7 @@ export interface Props {
+   emptyMessage?: string;
+   showLibraryOnlyFilter?: boolean;
+   showGenreFilter?: boolean;
++  showFirstLetterFilter?: boolean;
+   showHideEmptyFilter?: boolean;
+   showHideFullyPlayedFilter?: boolean;
+   allowCollapse?: boolean;
+@@ -486,6 +499,7 @@ const props = withDefaults(defineProps<Props>(), {
+   subtitle: undefined,
+   showLibraryOnlyFilter: false,
+   showGenreFilter: false,
++  showFirstLetterFilter: false,
+   showHideEmptyFilter: false,
+   showHideFullyPlayedFilter: false,
+   extraMenuItems: undefined,
+@@ -556,6 +570,7 @@ const params = ref<LoadDataParams>({
+   search: "",
+   libraryOnly: false,
+   genreIds: undefined,
++  startsWith: undefined,
+ });
+ const viewMode = ref("list");
+ const showSearch = ref(false);
+@@ -938,6 +953,13 @@ const changeSort = function (sort_key?: string) {
+   loadData(undefined, undefined, true);
+ };
+ 
++const changeFirstLetterFilter = function (letter: string) {
++  // clicking the letter you are already on clears it, like the other toggle filters
++  params.value.startsWith =
++    params.value.startsWith === letter ? undefined : letter;
++  loadData(undefined, undefined, true);
++};
++
+ const changeAlbumTypeFilter = function (albumType: string) {
+   if (params.value.albumType?.includes(albumType))
+     params.value.albumType = params.value.albumType?.filter(
+@@ -1068,6 +1090,7 @@ const hasActiveFilters = computed(() => {
+     (!props.requireProviderSelection && p.provider && p.provider.length > 0) ||
+     (p.albumType && p.albumType.length > 0) ||
+     genreActive ||
++    Boolean(p.startsWith) ||
+     // hide-empty genres filter: true (hide empty) and null (defaults only)
+     // both narrow the result; false/undefined means "show all"
+     p.hideEmptyFilter === true ||
+@@ -1443,6 +1466,28 @@ const menuItems = computed(() => {
+     });
+   }
+ 
++  // jump to a first letter: a big library is many pages deep, and scrolling is the
++  // only way to reach the far end of the alphabet without it
++  if (props.showFirstLetterFilter === true) {
++    items.push({
++      label: "tooltip.filter_first_letter",
++      icon: ArrowDownAZ,
++      disabled: loading.value,
++      active: params.value.startsWith !== undefined,
++      closeOnContentClick: false,
++      overflowAllowed: true,
++      subItems: FIRST_LETTER_BUCKETS.map((letter) => {
++        return {
++          // a bare letter is not a translation key; $t falls through to it unchanged,
++          // the same way the genre filter passes raw genre names
++          label: letter,
++          selected: params.value.startsWith === letter.toLowerCase(),
++          action: () => changeFirstLetterFilter(letter.toLowerCase()),
++        };
++      }),
++    });
++  }
++
+   // toggle search (auto-hidden for small listings)
+   if (searchAvailable.value) {
+     items.push({
+diff --git a/src/plugins/api/index.ts b/src/plugins/api/index.ts
+index 16edcc5..b8ee564 100644
+--- a/src/plugins/api/index.ts
++++ b/src/plugins/api/index.ts
+@@ -512,6 +512,7 @@ export class MusicAssistantApi {
+     order_by?: string,
+     provider?: string | string[],
+     genre?: number | number[],
++    starts_with?: string,
+   ): Promise<Track[]> {
+     return this.sendCommand("music/tracks/library_items", {
+       favorite,
+@@ -521,6 +522,7 @@ export class MusicAssistantApi {
+       order_by,
+       provider,
+       genre,
++      starts_with,
+     });
+   }
+ 
+@@ -661,6 +663,7 @@ export class MusicAssistantApi {
+     provider?: string | string[],
+     genre?: number | number[],
+     artist_type?: ArtistType,
++    starts_with?: string,
+   ): Promise<Artist[]> {
+     return this.sendCommand("music/artists/library_items", {
+       favorite,
+@@ -672,6 +675,7 @@ export class MusicAssistantApi {
+       provider,
+       genre,
+       artist_type,
++      starts_with,
+     });
+   }
+ 
+@@ -787,6 +791,7 @@ export class MusicAssistantApi {
+     album_types?: Array<AlbumType | string>,
+     provider?: string | string[],
+     genre?: number | number[],
++    starts_with?: string,
+   ): Promise<Album[]> {
+     return this.sendCommand("music/albums/library_items", {
+       favorite,
+@@ -797,6 +802,7 @@ export class MusicAssistantApi {
+       album_types,
+       provider,
+       genre,
++      starts_with,
+     });
+   }
+ 
+@@ -850,6 +856,7 @@ export class MusicAssistantApi {
+     order_by?: string,
+     provider?: string | string[],
+     genre?: number | number[],
++    starts_with?: string,
+   ): Promise<Playlist[]> {
+     return this.sendCommand("music/playlists/library_items", {
+       favorite,
+@@ -859,6 +866,7 @@ export class MusicAssistantApi {
+       order_by,
+       provider,
+       genre,
++      starts_with,
+     });
+   }
+ 
+@@ -1057,6 +1065,7 @@ export class MusicAssistantApi {
+     order_by?: string,
+     provider?: string | string[],
+     genre?: number | number[],
++    starts_with?: string,
+   ): Promise<Radio[]> {
+     return this.sendCommand("music/radios/library_items", {
+       favorite,
+@@ -1066,6 +1075,7 @@ export class MusicAssistantApi {
+       order_by,
+       provider,
+       genre,
++      starts_with,
+     });
+   }
+ 
+@@ -1119,6 +1129,7 @@ export class MusicAssistantApi {
+     provider?: string | string[],
+     genre?: number | number[],
+     collapse_collections?: boolean,
++    starts_with?: string,
+   ): Promise<(Audiobook | MediaCollection<Audiobook>)[]> {
+     return this.sendCommand("music/audiobooks/library_items", {
+       favorite,
+@@ -1129,6 +1140,7 @@ export class MusicAssistantApi {
+       provider,
+       genre,
+       collapse_collections,
++      starts_with,
+     });
+   }
+ 
+@@ -1179,6 +1191,7 @@ export class MusicAssistantApi {
+     order_by?: string,
+     provider?: string | string[],
+     genre?: number | number[],
++    starts_with?: string,
+   ): Promise<Podcast[]> {
+     return this.sendCommand("music/podcasts/library_items", {
+       favorite,
+@@ -1188,6 +1201,7 @@ export class MusicAssistantApi {
+       order_by,
+       provider,
+       genre,
++      starts_with,
+     });
+   }
+ 
+@@ -1208,6 +1222,7 @@ export class MusicAssistantApi {
+     opts: {
+       favorite?: boolean;
+       search?: string;
++      starts_with?: string;
+       limit?: number;
+       offset?: number;
+       order_by?: string;
+diff --git a/src/translations/en.json b/src/translations/en.json
+index a00432b..9d8495a 100644
+--- a/src/translations/en.json
++++ b/src/translations/en.json
+@@ -889,6 +889,7 @@
+         "hide_empty_genres": "Hide empty genres",
+         "show_empty_genres": "Show empty genres",
+         "filter_genre": "Filter by genre",
++        "filter_first_letter": "Jump to a letter",
+         "show_only_default_genres": "Show only default genres",
+         "show_all_genres": "Show all genres",
+         "filter_hide_fully_played": "Hide fully-played episodes",
+diff --git a/src/views/LibraryAlbums.vue b/src/views/LibraryAlbums.vue
+index 5df1001..5fdbef9 100644
+--- a/src/views/LibraryAlbums.vue
++++ b/src/views/LibraryAlbums.vue
+@@ -6,6 +6,7 @@
+     :show-favorites-only-filter="true"
+     :load-paged-data="loadItems"
+     :sort-keys="sortKeys"
++    :show-first-letter-filter="true"
+     :update-available="updateAvailable"
+     :title="$t('albums')"
+     :allow-key-hooks="true"
+@@ -84,10 +85,18 @@ const loadItems = async function (params: LoadDataParams) {
+     params.albumType,
+     params.provider && params.provider.length > 0 ? params.provider : undefined,
+     params.genreIds,
++    params.startsWith,
+   );
+ };
+ 
+ const setTotals = async function (params: LoadDataParams) {
++  // the count endpoints take no first letter, so a letter-filtered listing has no
++  // knowable total - same as the provider filter below. Checked first, or the
++  // unfiltered store count would be reported for a filtered list.
++  if (params.startsWith) {
++    total.value = undefined;
++    return;
++  }
+   if (!params.favoritesOnly && !params.albumType && !params.provider) {
+     total.value = store.libraryAlbumsCount;
+     return;
+diff --git a/src/views/LibraryArtists.vue b/src/views/LibraryArtists.vue
+index 235421f..30447ad 100644
+--- a/src/views/LibraryArtists.vue
++++ b/src/views/LibraryArtists.vue
+@@ -12,6 +12,7 @@
+     :show-search-button="true"
+     :show-genre-filter="true"
+     :sort-keys="sortKeys"
++    :show-first-letter-filter="true"
+     :icon="ArtistIcon"
+     :restore-state="true"
+     :total="total"
+@@ -65,10 +66,18 @@ const loadItems = async function (params: LoadDataParams) {
+     params.provider && params.provider.length > 0 ? params.provider : undefined,
+     params.genreIds,
+     ArtistType.SINGER,
++    params.startsWith,
+   );
+ };
+ 
+ const setTotals = async function (params: LoadDataParams) {
++  // the count endpoints take no first letter, so a letter-filtered listing has no
++  // knowable total - same as the provider filter below. Checked first, or the
++  // unfiltered store count would be reported for a filtered list.
++  if (params.startsWith) {
++    total.value = undefined;
++    return;
++  }
+   // When provider filter is active, we can't get accurate count from the count endpoint
+   // The total will be determined by the actual results returned
+   if (params.provider && params.provider.length > 0) {
+diff --git a/src/views/LibraryAudiobooks.vue b/src/views/LibraryAudiobooks.vue
+index b60ddfc..f9158db 100644
+--- a/src/views/LibraryAudiobooks.vue
++++ b/src/views/LibraryAudiobooks.vue
+@@ -8,6 +8,7 @@
+     :load-paged-data="loadItems"
+     :show-library="true"
+     :sort-keys="sortKeys"
++    :show-first-letter-filter="true"
+     :update-available="updateAvailable"
+     :title="$t('audiobooks')"
+     :allow-key-hooks="true"
+@@ -76,6 +77,7 @@ const loadItems = async function (params: LoadDataParams) {
+     params.provider && params.provider.length > 0 ? params.provider : undefined,
+     params.genreIds,
+     params.collapseCollections,
++    params.startsWith,
+   );
+ };
+ 
+@@ -96,6 +98,7 @@ const loadItemsAuthorsNarrators = async (
+     params.provider && params.provider.length > 0 ? params.provider : undefined,
+     params.genreIds,
+     artistType,
++    params.startsWith,
+   );
+ };
+ 
+@@ -109,6 +112,13 @@ const setTotals = async function (
+   params: LoadDataParams,
+   artistType?: ArtistType,
+ ) {
++  // the count endpoints take no first letter, so a letter-filtered listing has no
++  // knowable total - same as the provider filter below. Checked first, or the
++  // unfiltered store count would be reported for a filtered list.
++  if (params.startsWith) {
++    total.value = undefined;
++    return;
++  }
+   // When provider filter is active, we can't get accurate count from the count endpoint
+   // The total will be determined by the actual results returned
+   if (params.provider && params.provider.length > 0) {
+diff --git a/src/views/LibraryGenres.vue b/src/views/LibraryGenres.vue
+index ae8eec5..78d7096 100644
+--- a/src/views/LibraryGenres.vue
++++ b/src/views/LibraryGenres.vue
+@@ -19,6 +19,7 @@
+     :allow-collapse="true"
+     :hide-on-empty="false"
+     :sort-keys="sortKeys"
++    :show-first-letter-filter="true"
+     :limit="50"
+     :infinite-scroll="false"
+     :load-paged-data="section.load"
+@@ -70,6 +71,7 @@ const loadSection = (contentType: MediaType | "music") => {
+       content_type: contentType,
+       favorite: params.favoritesOnly || undefined,
+       search: params.search,
++      starts_with: params.startsWith,
+       limit: params.limit,
+       offset: params.offset,
+       order_by: params.sortBy,
+diff --git a/src/views/LibraryPlaylists.vue b/src/views/LibraryPlaylists.vue
+index 9505316..4426613 100644
+--- a/src/views/LibraryPlaylists.vue
++++ b/src/views/LibraryPlaylists.vue
+@@ -9,6 +9,7 @@
+     :load-paged-data="loadItems"
+     :show-library="true"
+     :sort-keys="sortKeys"
++    :show-first-letter-filter="true"
+     :update-available="updateAvailable"
+     :title="$t('playlists')"
+     :allow-key-hooks="true"
+@@ -79,10 +80,18 @@ const loadItems = async function (params: LoadDataParams) {
+     params.sortBy,
+     params.provider && params.provider.length > 0 ? params.provider : undefined,
+     params.genreIds,
++    params.startsWith,
+   );
+ };
+ 
+ const setTotals = async function (params: LoadDataParams) {
++  // the count endpoints take no first letter, so a letter-filtered listing has no
++  // knowable total - same as the provider filter below. Checked first, or the
++  // unfiltered store count would be reported for a filtered list.
++  if (params.startsWith) {
++    total.value = undefined;
++    return;
++  }
+   if (!params.favoritesOnly && !params.provider) {
+     total.value = store.libraryPlaylistsCount;
+     return;
+diff --git a/src/views/LibraryPodcasts.vue b/src/views/LibraryPodcasts.vue
+index 7afe3d2..a61c87f 100644
+--- a/src/views/LibraryPodcasts.vue
++++ b/src/views/LibraryPodcasts.vue
+@@ -8,6 +8,7 @@
+     :load-paged-data="loadItems"
+     :show-library="true"
+     :sort-keys="sortKeys"
++    :show-first-letter-filter="true"
+     :update-available="updateAvailable"
+     :title="$t('podcasts')"
+     :allow-key-hooks="true"
+@@ -62,10 +63,18 @@ const loadItems = async function (params: LoadDataParams) {
+     params.sortBy,
+     params.provider && params.provider.length > 0 ? params.provider : undefined,
+     params.genreIds,
++    params.startsWith,
+   );
+ };
+ 
+ const setTotals = async function (params: LoadDataParams) {
++  // the count endpoints take no first letter, so a letter-filtered listing has no
++  // knowable total - same as the provider filter below. Checked first, or the
++  // unfiltered store count would be reported for a filtered list.
++  if (params.startsWith) {
++    total.value = undefined;
++    return;
++  }
+   if (!params.favoritesOnly && !params.provider) {
+     total.value = store.libraryPodcastsCount;
+     return;
+diff --git a/src/views/LibraryRadios.vue b/src/views/LibraryRadios.vue
+index 6e27292..c71b9d5 100644
+--- a/src/views/LibraryRadios.vue
++++ b/src/views/LibraryRadios.vue
+@@ -8,6 +8,7 @@
+     :show-favorites-only-filter="true"
+     :load-paged-data="loadItems"
+     :sort-keys="sortKeys"
++    :show-first-letter-filter="true"
+     :update-available="updateAvailable"
+     :title="$t('radios')"
+     :show-search-button="true"
+@@ -111,10 +112,18 @@ const loadItems = async function (params: LoadDataParams) {
+     params.sortBy,
+     params.provider && params.provider.length > 0 ? params.provider : undefined,
+     params.genreIds,
++    params.startsWith,
+   );
+ };
+ 
+ const setTotals = async function (params: LoadDataParams) {
++  // the count endpoints take no first letter, so a letter-filtered listing has no
++  // knowable total - same as the provider filter below. Checked first, or the
++  // unfiltered store count would be reported for a filtered list.
++  if (params.startsWith) {
++    total.value = undefined;
++    return;
++  }
+   if (!params.favoritesOnly && !params.provider) {
+     total.value = store.libraryRadiosCount;
+     return;
+diff --git a/src/views/LibraryTracks.vue b/src/views/LibraryTracks.vue
+index c688af3..d038e0f 100644
+--- a/src/views/LibraryTracks.vue
++++ b/src/views/LibraryTracks.vue
+@@ -8,6 +8,7 @@
+     :show-track-number="false"
+     :load-paged-data="loadItems"
+     :sort-keys="sortKeys"
++    :show-first-letter-filter="true"
+     :show-album="true"
+     :update-available="updateAvailable"
+     :title="$t('tracks')"
+@@ -118,10 +119,18 @@ const loadItems = async function (params: LoadDataParams) {
+     params.sortBy,
+     params.provider && params.provider.length > 0 ? params.provider : undefined,
+     params.genreIds,
++    params.startsWith,
+   );
+ };
+ 
+ const setTotals = async function (params: LoadDataParams) {
++  // the count endpoints take no first letter, so a letter-filtered listing has no
++  // knowable total - same as the provider filter below. Checked first, or the
++  // unfiltered store count would be reported for a filtered list.
++  if (params.startsWith) {
++    total.value = undefined;
++    return;
++  }
+   if (!params.favoritesOnly && !params.provider) {
+     total.value = store.libraryTracksCount;
+     return;
+-- 
+2.43.0
+
