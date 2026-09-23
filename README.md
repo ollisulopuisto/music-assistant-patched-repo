@@ -21,11 +21,11 @@ https://github.com/ollisulopuisto/music-assistant-patched-repo
 | `patches/server/0001-up-next-queue-as-podcast.patch` | Surfaces the Pocket Casts Up Next queue as a podcast in the library, with resume positions, so an episode started on the phone continues on a speaker |
 | `patches/server/0002-status-refetch.patch` | Stops re-fetching the account-wide in-progress/history lists once per podcast during a sync |
 | `patches/server/0003-show-notes.patch` | Gives episodes in the mixed browse folders their show notes |
-| `patches/server/0004-library-first-letter-filter.patch` | Lets a library listing be narrowed to one first letter, as an indexed range on the name column the current sort uses |
+| `patches/server/0004-library-first-letter-jump.patch` | Lets a library listing start at a first letter and run on from there, as an indexed comparison on the name column the current sort uses |
 | `patches/server/0100-install-patched-frontend.patch` | Installs the locally built frontend wheel over the one upstream pins |
 | `patches/frontend/0001-forbid-forms.patch` | Stops provider metadata rendering form controls (a feed-supplied `<form>` was a working phishing box) |
 | `patches/frontend/0002-show-notes.patch` | Shows an episode's notes in the list subtitle and in the fullscreen player's side panel, where lyrics go |
-| `patches/frontend/0003-first-letter-filter.patch` | Puts an A-Z jump in every library view's toolbar, so a big library is reachable without scrolling through it |
+| `patches/frontend/0003-alphabet-jump.patch` | Puts an A-Z strip above every library listing, so a big library is reachable without scrolling through it |
 
 Every one of these is also open as a pull request upstream. **When one is merged,
 delete its patch file and push** — the next build picks up the change from

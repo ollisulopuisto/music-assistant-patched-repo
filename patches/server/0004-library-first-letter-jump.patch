@@ -1,31 +1,29 @@
-From 71104ec9c55c7578cc50c2e25d3e2254304c5a67 Mon Sep 17 00:00:00 2001
+From c59966d347a4003230333288536b1a809909a9d5 Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
 Date: Wed, 23 Sep 2026 20:56:22 +0000
-Subject: [PATCH] Let a library listing be narrowed to one first letter
+Subject: [PATCH] Let a library listing start at a first letter
 
 A big library is only reachable by scrolling. The listing pages 50 items at a
 time, so reaching T in a few thousand artists is dozens of round-trips, and the
 search box does not help: it matches anywhere in the name, so "t" returns every
 item containing one.
 
-library_items gains starts_with: a single letter, or "#" for the items filed
-under no letter at all. Two details make it behave rather than merely work.
+library_items gains starts_from, which drops the items filed before a letter and
+leaves the listing running from there to the end. A jump rather than a filter, so
+scrolling carries on into the letters after it - which is the thing a bucket
+filter cannot do, and the reason this is a lower bound and not a range.
 
-It filters on whichever name column the current ordering sorts on, so the items
-kept are the ones that really appear under that letter - sorted by sort name,
-"The Beatles" is under B, and filtering on search_name would have hidden it from
-the letter the list files it under.
+It compares against whichever name column the current ordering sorts on, so the
+item it opens at is the one that really appears there - sorted by sort name,
+"The Beatles" is filed under B, and comparing search_name would have jumped
+somewhere the list disagrees with.
 
-It is a range rather than LIKE 'x%', so SQLite seeks into the index that is
-already there:
+A plain comparison seeks into the index that is already there:
 
-  SEARCH artists USING INDEX artists_search_sort_name_idx
-    (search_sort_name>? AND search_sort_name<?)
+  SEARCH artists USING INDEX artists_search_sort_name_idx (search_sort_name>?)
 
-That also makes it cheaper than the contains-search it sits beside. The columns
-are already lowercase and diacritic-folded, so Atna files under A and the '#'
-bucket is simply everything sorting below 'a' - digits, and the empty string a
-name like '!!!' reduces to.
+The columns are lowercase and diacritic-folded already, so Atna is reachable from
+A, and a letter nothing is filed under simply opens at whatever follows it.
 
 Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01VpS6zTXcRdworxLZ6Dp1De
@@ -33,23 +31,23 @@ Claude-Session: https://claude.ai/code/session_01VpS6zTXcRdworxLZ6Dp1De
  .../controllers/music/media/albums.py         |   2 +
  .../controllers/music/media/artists.py        |   2 +
  .../controllers/music/media/audiobooks.py     |   5 +
- .../controllers/music/media/base.py           |  65 ++++++-
+ .../controllers/music/media/base.py           |  55 +++++-
  .../controllers/music/media/genres.py         |   2 +
  .../controllers/music/media/podcasts.py       |   4 +-
  .../controllers/music/media/tracks.py         |   2 +
- .../music/test_library_first_letter_filter.py | 172 ++++++++++++++++++
- 8 files changed, 252 insertions(+), 2 deletions(-)
- create mode 100644 tests/controllers/music/test_library_first_letter_filter.py
+ .../music/test_library_first_letter_jump.py   | 176 ++++++++++++++++++
+ 8 files changed, 246 insertions(+), 2 deletions(-)
+ create mode 100644 tests/controllers/music/test_library_first_letter_jump.py
 
 diff --git a/music_assistant/controllers/music/media/albums.py b/music_assistant/controllers/music/media/albums.py
-index 719012cb9..34f9b6267 100644
+index 719012cb9..01737488b 100644
 --- a/music_assistant/controllers/music/media/albums.py
 +++ b/music_assistant/controllers/music/media/albums.py
 @@ -166,6 +166,7 @@ class AlbumsController(MediaControllerBase[Album]):
          self,
          favorite: bool | None = None,
          search: str | None = None,
-+        starts_with: str | None = None,
++        starts_from: str | None = None,
          limit: int = 500,
          offset: int = 0,
          order_by: str = "sort_name",
@@ -57,19 +55,19 @@ index 719012cb9..34f9b6267 100644
          result = await self.get_library_items_by_query(
              favorite=favorite,
              search=search,
-+            starts_with=starts_with,
++            starts_from=starts_from,
              genre_ids=genre,
              limit=limit,
              offset=offset,
 diff --git a/music_assistant/controllers/music/media/artists.py b/music_assistant/controllers/music/media/artists.py
-index c543af61a..706a8ab66 100644
+index c543af61a..113a1ff6d 100644
 --- a/music_assistant/controllers/music/media/artists.py
 +++ b/music_assistant/controllers/music/media/artists.py
 @@ -158,6 +158,7 @@ class ArtistsController(MediaControllerBase[Artist]):
          self,
          favorite: bool | None = None,
          search: str | None = None,
-+        starts_with: str | None = None,
++        starts_from: str | None = None,
          limit: int = 500,
          offset: int = 0,
          order_by: str = "sort_name",
@@ -77,19 +75,19 @@ index c543af61a..706a8ab66 100644
          return await self.get_library_items_by_query(
              favorite=favorite,
              search=search,
-+            starts_with=starts_with,
++            starts_from=starts_from,
              genre_ids=genre,
              limit=limit,
              offset=offset,
 diff --git a/music_assistant/controllers/music/media/audiobooks.py b/music_assistant/controllers/music/media/audiobooks.py
-index ce1bcb933..be81ae53c 100644
+index ce1bcb933..74fb7f574 100644
 --- a/music_assistant/controllers/music/media/audiobooks.py
 +++ b/music_assistant/controllers/music/media/audiobooks.py
 @@ -152,6 +152,7 @@ class AudiobooksController(MediaControllerBase[Audiobook]):
              self,
              favorite: bool | None = None,
              search: str | None = None,
-+            starts_with: str | None = None,
++            starts_from: str | None = None,
              limit: int = 500,
              offset: int = 0,
              order_by: str = "sort_name",
@@ -97,7 +95,7 @@ index ce1bcb933..be81ae53c 100644
              self,
              favorite: bool | None = None,
              search: str | None = None,
-+            starts_with: str | None = None,
++            starts_from: str | None = None,
              limit: int = 500,
              offset: int = 0,
              order_by: str = "sort_name",
@@ -105,7 +103,7 @@ index ce1bcb933..be81ae53c 100644
              self,
              favorite: bool | None = None,
              search: str | None = None,
-+            starts_with: str | None = None,
++            starts_from: str | None = None,
              limit: int = 500,
              offset: int = 0,
              order_by: str = "sort_name",
@@ -113,7 +111,7 @@ index ce1bcb933..be81ae53c 100644
          self,
          favorite: bool | None = None,
          search: str | None = None,
-+        starts_with: str | None = None,
++        starts_from: str | None = None,
          limit: int = 500,
          offset: int = 0,
          order_by: str = "sort_name",
@@ -121,192 +119,175 @@ index ce1bcb933..be81ae53c 100644
          result = await self.get_library_items_by_query(
              favorite=favorite,
              search=search,
-+            starts_with=starts_with,
++            starts_from=starts_from,
              genre_ids=genre,
              limit=limit,
              offset=offset,
 diff --git a/music_assistant/controllers/music/media/base.py b/music_assistant/controllers/music/media/base.py
-index 05461e7d2..8ca1d82f7 100644
+index 05461e7d2..6cd8bb2c4 100644
 --- a/music_assistant/controllers/music/media/base.py
 +++ b/music_assistant/controllers/music/media/base.py
-@@ -144,6 +144,12 @@ SORT_KEYS = {
-     "random_play_count": "RANDOM(), play_count ASC",
- }
- 
-+# The bucket a first-letter filter asks for when the name does not start with a letter.
-+# search_name and search_sort_name hold lowercase ASCII alphanumerics only (see
-+# create_safe_string), so "does not start with a-z" is exactly "sorts before 'a'":
-+# names starting with a digit, and the empty string a name like "!!!" reduces to.
-+FIRST_LETTER_OTHER = "#"
-+
- 
- @dataclass(slots=True)
- class LibraryItemSyncDetails:
-@@ -429,6 +435,7 @@ class MediaControllerBase[ItemCls: "MediaItemType"](metaclass=ABCMeta):
+@@ -429,6 +429,7 @@ class MediaControllerBase[ItemCls: "MediaItemType"](metaclass=ABCMeta):
              self,
              favorite: bool | None = None,
              search: str | None = None,
-+            starts_with: str | None = None,
++            starts_from: str | None = None,
              limit: int = 500,
              offset: int = 0,
              order_by: str = "sort_name",
-@@ -447,6 +454,7 @@ class MediaControllerBase[ItemCls: "MediaItemType"](metaclass=ABCMeta):
+@@ -447,6 +448,7 @@ class MediaControllerBase[ItemCls: "MediaItemType"](metaclass=ABCMeta):
              self,
              favorite: bool | None = None,
              search: str | None = None,
-+            starts_with: str | None = None,
++            starts_from: str | None = None,
              limit: int = 500,
              offset: int = 0,
              order_by: str = "sort_name",
-@@ -465,6 +473,7 @@ class MediaControllerBase[ItemCls: "MediaItemType"](metaclass=ABCMeta):
+@@ -465,6 +467,7 @@ class MediaControllerBase[ItemCls: "MediaItemType"](metaclass=ABCMeta):
              self,
              favorite: bool | None = None,
              search: str | None = None,
-+            starts_with: str | None = None,
++            starts_from: str | None = None,
              limit: int = 500,
              offset: int = 0,
              order_by: str = "sort_name",
-@@ -482,6 +491,7 @@ class MediaControllerBase[ItemCls: "MediaItemType"](metaclass=ABCMeta):
+@@ -482,6 +485,7 @@ class MediaControllerBase[ItemCls: "MediaItemType"](metaclass=ABCMeta):
          self,
          favorite: bool | None = None,
          search: str | None = None,
-+        starts_with: str | None = None,
++        starts_from: str | None = None,
          limit: int = 500,
          offset: int = 0,
          order_by: str = "sort_name",
-@@ -499,6 +509,10 @@ class MediaControllerBase[ItemCls: "MediaItemType"](metaclass=ABCMeta):
+@@ -499,6 +503,12 @@ class MediaControllerBase[ItemCls: "MediaItemType"](metaclass=ABCMeta):
  
          :param favorite: Filter by favorite status.
          :param search: Filter by search query.
-+        :param starts_with: Keep only the items filed under one first letter, or under
-+            ``FIRST_LETTER_OTHER`` for those filed under no letter at all. Matched against
-+            whichever name the current ``order_by`` sorts on, so the items kept are the ones
-+            that really appear there: sorted by sort name, "The Beatles" is under B, not T.
++        :param starts_from: Drop the items filed before this letter, leaving the listing
++            starting there and running on to the end - a jump into a long library rather
++            than a filter, so scrolling carries on into the letters after it. Compared
++            against whichever name the current ``order_by`` sorts on, so the item it starts
++            at is the one that really appears there: sorted by sort name, "The Beatles" is
++            filed under B, not T.
          :param limit: Maximum number of items to return.
          :param offset: Number of items to skip.
          :param order_by: Order by field (e.g. 'sort_name', 'timestamp_added').
-@@ -522,6 +536,7 @@ class MediaControllerBase[ItemCls: "MediaItemType"](metaclass=ABCMeta):
+@@ -522,6 +532,7 @@ class MediaControllerBase[ItemCls: "MediaItemType"](metaclass=ABCMeta):
          items = await self.get_library_items_by_query(
              favorite=favorite,
              search=search,
-+            starts_with=starts_with,
++            starts_from=starts_from,
              limit=limit,
              offset=offset,
              order_by=order_by,
-@@ -544,6 +559,7 @@ class MediaControllerBase[ItemCls: "MediaItemType"](metaclass=ABCMeta):
+@@ -544,6 +555,7 @@ class MediaControllerBase[ItemCls: "MediaItemType"](metaclass=ABCMeta):
                  limit=limit,
                  offset=offset,
                  favorite=favorite,
-+                starts_with=starts_with,
++                starts_from=starts_from,
                  order_by=order_by,
                  provider=provider,
                  genre=genre,
-@@ -1420,6 +1436,7 @@ class MediaControllerBase[ItemCls: "MediaItemType"](metaclass=ABCMeta):
+@@ -1420,6 +1432,7 @@ class MediaControllerBase[ItemCls: "MediaItemType"](metaclass=ABCMeta):
              self,
              favorite: bool | None = None,
              search: str | None = None,
-+            starts_with: str | None = None,
++            starts_from: str | None = None,
              limit: int = 500,
              offset: int = 0,
              order_by: str | None = None,
-@@ -1441,6 +1458,7 @@ class MediaControllerBase[ItemCls: "MediaItemType"](metaclass=ABCMeta):
+@@ -1441,6 +1454,7 @@ class MediaControllerBase[ItemCls: "MediaItemType"](metaclass=ABCMeta):
              self,
              favorite: bool | None = None,
              search: str | None = None,
-+            starts_with: str | None = None,
++            starts_from: str | None = None,
              limit: int = 500,
              offset: int = 0,
              order_by: str | None = None,
-@@ -1462,6 +1480,7 @@ class MediaControllerBase[ItemCls: "MediaItemType"](metaclass=ABCMeta):
+@@ -1462,6 +1476,7 @@ class MediaControllerBase[ItemCls: "MediaItemType"](metaclass=ABCMeta):
              self,
              favorite: bool | None = None,
              search: str | None = None,
-+            starts_with: str | None = None,
++            starts_from: str | None = None,
              limit: int = 500,
              offset: int = 0,
              order_by: str | None = None,
-@@ -1483,6 +1502,7 @@ class MediaControllerBase[ItemCls: "MediaItemType"](metaclass=ABCMeta):
+@@ -1483,6 +1498,7 @@ class MediaControllerBase[ItemCls: "MediaItemType"](metaclass=ABCMeta):
          self,
          favorite: bool | None = None,
          search: str | None = None,
-+        starts_with: str | None = None,
++        starts_from: str | None = None,
          limit: int = 500,
          offset: int = 0,
          order_by: str | None = None,
-@@ -1512,6 +1532,7 @@ class MediaControllerBase[ItemCls: "MediaItemType"](metaclass=ABCMeta):
+@@ -1512,6 +1528,7 @@ class MediaControllerBase[ItemCls: "MediaItemType"](metaclass=ABCMeta):
                  join_parts=join_parts,
                  favorite=favorite,
                  search=search if not collapse_collections else None,
-+                starts_with=starts_with,
++                starts_from=starts_from,
                  genre_ids=genre_ids,
                  provider_filter=provider_filter,
                  played_only=played_only,
-@@ -1526,6 +1547,8 @@ class MediaControllerBase[ItemCls: "MediaItemType"](metaclass=ABCMeta):
+@@ -1526,6 +1543,8 @@ class MediaControllerBase[ItemCls: "MediaItemType"](metaclass=ABCMeta):
                  query_params=query_params,
                  favorite=favorite,
                  search=search if not collapse_collections else None,
-+                starts_with=starts_with,
++                starts_from=starts_from,
 +                order_by=order_by,
                  genre_ids=genre_ids,
                  provider_filter=provider_filter,
                  played_only=played_only,
-@@ -1777,6 +1800,38 @@ class MediaControllerBase[ItemCls: "MediaItemType"](metaclass=ABCMeta):
+@@ -1777,6 +1796,32 @@ class MediaControllerBase[ItemCls: "MediaItemType"](metaclass=ABCMeta):
          """Return the SQL WHERE clause fragment used for search filtering."""
          return search_name_match_clause(self.db_table, search, "search", query_params)
  
 +    @final
-+    def _starts_with_filter_clause(
-+        self, starts_with: str, order_by: str | None, query_params: dict[str, Any]
++    def _starts_from_clause(
++        self, starts_from: str, order_by: str | None, query_params: dict[str, Any]
 +    ) -> str:
 +        """
-+        Return the SQL WHERE clause fragment that keeps one first-letter bucket.
++        Return the SQL WHERE clause fragment that starts the listing at a letter.
 +
-+        :param starts_with: A single letter, or ``FIRST_LETTER_OTHER`` for the items filed
-+            under no letter.
++        :param starts_from: The letter to start at.
 +        :param order_by: The ordering this query will use, which decides which name column
-+            the bucket is matched against.
++            the letter is compared against.
 +        :param query_params: Query params dict; the clause's bound params are added to it.
-+        :raises ValueError: If starts_with is neither a single ASCII letter nor
-+            ``FIRST_LETTER_OTHER``.
++        :raises ValueError: If starts_from is not a single ASCII letter.
 +        """
-+        # follow the ordering's own column, or a letter would hide items the list files
-+        # elsewhere: sorted by sort name, "The Beatles" sits under B and not under T
++        letter = starts_from.lower()
++        if len(letter) != 1 or not ("a" <= letter <= "z"):
++            msg = f"starts_from must be a single letter, got {starts_from!r}"
++            raise ValueError(msg)
++        # follow the ordering's own column, or the jump would land somewhere the list does
++        # not agree with: sorted by sort name, "The Beatles" is filed under B, not under T
 +        name_column = "search_name" if order_by in ("name", "name_desc") else "search_sort_name"
 +        column = f"{self.db_table}.{name_column}"
-+        # expressed as a range rather than LIKE 'x%' so the index on the column is used
-+        if starts_with == FIRST_LETTER_OTHER:
-+            # 'a' is the upper bound here, not the lower one: everything below it
-+            query_params["starts_with_hi"] = "a"
-+            return f"{column} < :starts_with_hi"
-+        letter = starts_with.lower()
-+        if len(letter) != 1 or not ("a" <= letter <= "z"):
-+            msg = f"starts_with must be a single letter or {FIRST_LETTER_OTHER!r}, got {starts_with!r}"
-+            raise ValueError(msg)
-+        query_params["starts_with_lo"] = letter
-+        query_params["starts_with_hi"] = chr(ord(letter) + 1)
-+        return f"({column} >= :starts_with_lo AND {column} < :starts_with_hi)"
++        # an open-ended bound rather than LIKE 'x%': the items after this letter are what
++        # makes it a jump instead of a filter, and a comparison still seeks into the index
++        query_params["starts_from"] = letter
++        return f"{column} >= :starts_from"
 +
      @final
      def _preprocess_search(self, search: str | None) -> str | None:
          """Normalize the search string for use in the search filter clauses."""
-@@ -1809,6 +1864,7 @@ class MediaControllerBase[ItemCls: "MediaItemType"](metaclass=ABCMeta):
+@@ -1809,6 +1854,7 @@ class MediaControllerBase[ItemCls: "MediaItemType"](metaclass=ABCMeta):
          search: str | None,
          genre_ids: list[int] | None,
          provider_filter: list[str] | None,
-+        starts_with: str | None = None,
++        starts_from: str | None = None,
          played_only: bool = False,
          limit: int = 500,
          in_library_only: bool = False,
-@@ -1824,6 +1880,8 @@ class MediaControllerBase[ItemCls: "MediaItemType"](metaclass=ABCMeta):
+@@ -1824,6 +1870,8 @@ class MediaControllerBase[ItemCls: "MediaItemType"](metaclass=ABCMeta):
              query_params=query_params,
              favorite=favorite,
              search=search,
-+            starts_with=starts_with,
++            starts_from=starts_from,
 +            order_by=order_by,
              genre_ids=genre_ids,
              provider_filter=provider_filter,
              played_only=played_only,
-@@ -1849,7 +1907,7 @@ class MediaControllerBase[ItemCls: "MediaItemType"](metaclass=ABCMeta):
+@@ -1849,7 +1897,7 @@ class MediaControllerBase[ItemCls: "MediaItemType"](metaclass=ABCMeta):
          join_parts.clear()
  
      @final
@@ -315,34 +296,34 @@ index 05461e7d2..8ca1d82f7 100644
          self,
          query_parts: list[str],
          query_params: dict[str, Any],
-@@ -1857,6 +1915,8 @@ class MediaControllerBase[ItemCls: "MediaItemType"](metaclass=ABCMeta):
+@@ -1857,6 +1905,8 @@ class MediaControllerBase[ItemCls: "MediaItemType"](metaclass=ABCMeta):
          search: str | None,
          genre_ids: list[int] | None,
          provider_filter: list[str] | None,
-+        starts_with: str | None = None,
++        starts_from: str | None = None,
 +        order_by: str | None = None,
          played_only: bool = False,
          in_library_only: bool = False,
          reachable_via: list[str] | None = None,
-@@ -1865,6 +1925,9 @@ class MediaControllerBase[ItemCls: "MediaItemType"](metaclass=ABCMeta):
+@@ -1865,6 +1915,9 @@ class MediaControllerBase[ItemCls: "MediaItemType"](metaclass=ABCMeta):
          # handle search
          if search:
              query_parts.append(self._search_filter_clause(search, query_params))
-+        # handle first-letter filter
-+        if starts_with:
-+            query_parts.append(self._starts_with_filter_clause(starts_with, order_by, query_params))
++        # handle the first-letter jump
++        if starts_from:
++            query_parts.append(self._starts_from_clause(starts_from, order_by, query_params))
          # handle favorite filter
          if favorite is not None:
              query_parts.append(f"{self.db_table}.favorite = :favorite")
 diff --git a/music_assistant/controllers/music/media/genres.py b/music_assistant/controllers/music/media/genres.py
-index 61b3bcd6e..9d7a6c647 100644
+index 61b3bcd6e..a8c8f7425 100644
 --- a/music_assistant/controllers/music/media/genres.py
 +++ b/music_assistant/controllers/music/media/genres.py
 @@ -301,6 +301,7 @@ class GenreController(MediaControllerBase[Genre]):
          self,
          favorite: bool | None = None,
          search: str | None = None,
-+        starts_with: str | None = None,
++        starts_from: str | None = None,
          limit: int = 500,
          offset: int = 0,
          order_by: str = "sort_name",
@@ -350,12 +331,12 @@ index 61b3bcd6e..9d7a6c647 100644
          items = await self.get_library_items_by_query(
              favorite=favorite,
              search=search,
-+            starts_with=starts_with,
++            starts_from=starts_from,
              limit=limit,
              offset=offset,
              order_by=order_by,
 diff --git a/music_assistant/controllers/music/media/podcasts.py b/music_assistant/controllers/music/media/podcasts.py
-index 5773cfeb3..adac02f0e 100644
+index 5773cfeb3..22f02fba9 100644
 --- a/music_assistant/controllers/music/media/podcasts.py
 +++ b/music_assistant/controllers/music/media/podcasts.py
 @@ -75,10 +75,11 @@ class PodcastsController(MediaControllerBase[Podcast]):
@@ -367,7 +348,7 @@ index 5773cfeb3..adac02f0e 100644
          self,
          favorite: bool | None = None,
          search: str | None = None,
-+        starts_with: str | None = None,
++        starts_from: str | None = None,
          limit: int = 500,
          offset: int = 0,
          order_by: str = "sort_name",
@@ -375,19 +356,19 @@ index 5773cfeb3..adac02f0e 100644
          result = await self.get_library_items_by_query(
              favorite=favorite,
              search=search,
-+            starts_with=starts_with,
++            starts_from=starts_from,
              genre_ids=genre,
              limit=limit,
              offset=offset,
 diff --git a/music_assistant/controllers/music/media/tracks.py b/music_assistant/controllers/music/media/tracks.py
-index 17eaea025..a386a888c 100644
+index 17eaea025..fa78651e6 100644
 --- a/music_assistant/controllers/music/media/tracks.py
 +++ b/music_assistant/controllers/music/media/tracks.py
 @@ -241,6 +241,7 @@ class TracksController(MediaControllerBase[Track]):
          self,
          favorite: bool | None = None,
          search: str | None = None,
-+        starts_with: str | None = None,
++        starts_from: str | None = None,
          limit: int = 500,
          offset: int = 0,
          order_by: str = "sort_name",
@@ -395,24 +376,26 @@ index 17eaea025..a386a888c 100644
          result = await self.get_library_items_by_query(
              favorite=favorite,
              search=search,
-+            starts_with=starts_with,
++            starts_from=starts_from,
              genre_ids=genre,
              limit=limit,
              offset=offset,
-diff --git a/tests/controllers/music/test_library_first_letter_filter.py b/tests/controllers/music/test_library_first_letter_filter.py
+diff --git a/tests/controllers/music/test_library_first_letter_jump.py b/tests/controllers/music/test_library_first_letter_jump.py
 new file mode 100644
-index 000000000..442ae437a
+index 000000000..e4527ed10
 --- /dev/null
-+++ b/tests/controllers/music/test_library_first_letter_filter.py
-@@ -0,0 +1,172 @@
++++ b/tests/controllers/music/test_library_first_letter_jump.py
+@@ -0,0 +1,176 @@
 +"""
-+Tests for the first-letter filter on library listings.
++Tests for the first-letter jump on library listings.
 +
 +A large library is unreachable by scrolling: the listing pages 50 items at a time, so
-+getting to T means dozens of round-trips. ``starts_with`` keeps only the items filed
-+under one letter. The interesting part is *which* name it files them under - it has to
-+be the one the current ordering uses, or a letter would hide items the list puts
-+elsewhere.
++getting to T means dozens of round-trips. ``starts_from`` drops everything filed before
++a letter, leaving the listing starting there and running on to the end - a jump rather
++than a filter, so scrolling carries on into the letters after it.
++
++The interesting part is *which* name it compares against - it has to be the one the
++current ordering uses, or the jump lands somewhere the list does not agree with.
 +"""
 +
 +from __future__ import annotations
@@ -424,7 +407,6 @@ index 000000000..442ae437a
 +import pytest
 +from music_assistant_models.media_items import Artist, ProviderMapping
 +
-+from music_assistant.controllers.music.media.base import FIRST_LETTER_OTHER
 +from music_assistant.mass import MusicAssistant
 +
 +pytestmark = pytest.mark.asyncio
@@ -467,86 +449,89 @@ index 000000000..442ae437a
 +    return music_mass_module
 +
 +
-+async def _names(mass: MusicAssistant, **kwargs: object) -> set[str]:
++async def _names(mass: MusicAssistant, **kwargs: Any) -> list[str]:
 +    """Return the names of the library artists matching the given listing arguments."""
-+    return {item.name for item in await mass.music.artists.library_items(**kwargs)}  # type: ignore[arg-type]
++    return [item.name for item in await mass.music.artists.library_items(**kwargs)]
 +
 +
-+async def test_letter_follows_the_sort_name(lettered_mass: MusicAssistant) -> None:
-+    """Sorted by sort name, "The Beatles" is filed under B rather than T."""
-+    assert "The Beatles" in await _names(lettered_mass, starts_with="b", order_by="sort_name")
-+    assert "The Beatles" not in await _names(lettered_mass, starts_with="t", order_by="sort_name")
++async def test_the_letters_after_it_are_still_there(lettered_mass: MusicAssistant) -> None:
++    """The point of a jump: what follows the letter stays in the listing, in order."""
++    from_s = await _names(lettered_mass, starts_from="s", order_by="name")
++    assert from_s == ["Sigur Rós", "Talk Talk", "The Beatles", "Tool"]
 +
 +
-+async def test_letter_follows_the_plain_name(lettered_mass: MusicAssistant) -> None:
-+    """Sorted by name, the same artist is filed under T, alongside the other Ts."""
-+    assert await _names(lettered_mass, starts_with="t", order_by="name") == {
-+        "The Beatles",
-+        "Talk Talk",
-+        "Tool",
-+    }
-+    assert "The Beatles" not in await _names(lettered_mass, starts_with="b", order_by="name")
++async def test_it_starts_at_the_letter(lettered_mass: MusicAssistant) -> None:
++    """Everything filed before the letter is gone, so the listing opens where asked."""
++    from_t = await _names(lettered_mass, starts_from="t", order_by="name")
++    assert from_t[0] == "Talk Talk"
++    assert "Sigur Rós" not in from_t
++    assert "1975" not in from_t
++
++
++async def test_it_follows_the_sort_name(lettered_mass: MusicAssistant) -> None:
++    """Sorted by sort name, "The Beatles" is filed under B, so a jump to T is past it."""
++    assert "The Beatles" in await _names(lettered_mass, starts_from="b", order_by="sort_name")
++    assert "The Beatles" not in await _names(lettered_mass, starts_from="t", order_by="sort_name")
++
++
++async def test_it_follows_the_plain_name(lettered_mass: MusicAssistant) -> None:
++    """Sorted by name, the same artist is filed under T, so a jump to T reaches it."""
++    assert "The Beatles" in await _names(lettered_mass, starts_from="t", order_by="name")
 +
 +
 +async def test_diacritics_are_folded(lettered_mass: MusicAssistant) -> None:
 +    """A name is filed under the letter it reads as, not the codepoint it starts with."""
-+    assert "Ätna" in await _names(lettered_mass, starts_with="a", order_by="name")
-+    assert "Sigur Rós" in await _names(lettered_mass, starts_with="s", order_by="name")
++    from_a = await _names(lettered_mass, starts_from="a", order_by="name")
++    assert "Ätna" in from_a
++    # and the unlettered names sort below 'a', so a jump to A is already past them
++    assert "1975" not in from_a
++    assert "!!!" not in from_a
 +
 +
 +async def test_case_is_ignored(lettered_mass: MusicAssistant) -> None:
 +    """The caller may send either case for the letter."""
-+    assert await _names(lettered_mass, starts_with="T", order_by="name") == await _names(
-+        lettered_mass, starts_with="t", order_by="name"
++    assert await _names(lettered_mass, starts_from="T", order_by="name") == await _names(
++        lettered_mass, starts_from="t", order_by="name"
 +    )
 +
 +
-+async def test_other_bucket_holds_everything_unlettered(lettered_mass: MusicAssistant) -> None:
-+    """Digits and names that reduce to nothing at all are reachable, and only there."""
-+    assert await _names(lettered_mass, starts_with=FIRST_LETTER_OTHER, order_by="name") == {
-+        "1975",
-+        "!!!",
-+    }
-+
-+
-+async def test_every_item_lands_in_exactly_one_bucket(lettered_mass: MusicAssistant) -> None:
-+    """The A-Z strip plus the other bucket partitions the library: nothing is unreachable."""
-+    for order_by in ("name", "sort_name"):
-+        seen: list[str] = []
-+        for bucket in [FIRST_LETTER_OTHER, *"abcdefghijklmnopqrstuvwxyz"]:
-+            seen.extend(await _names(lettered_mass, starts_with=bucket, order_by=order_by))
-+        assert sorted(seen) == sorted(SEEDED_ARTISTS)
++async def test_a_letter_with_nothing_of_its_own_lands_on_the_next_one(
++    lettered_mass: MusicAssistant,
++) -> None:
++    """Nothing is filed under Q, so jumping there opens at whatever follows it."""
++    assert await _names(lettered_mass, starts_from="q", order_by="name") == await _names(
++        lettered_mass, starts_from="s", order_by="name"
++    )
 +
 +
 +async def test_composes_with_the_other_filters(lettered_mass: MusicAssistant) -> None:
-+    """A letter narrows the same result set the other filters do, rather than replacing it."""
-+    assert await _names(
-+        lettered_mass, starts_with="t", search="tool", order_by="name"
-+    ) == {"Tool"}
-+    assert not await _names(lettered_mass, starts_with="b", search="tool", order_by="name")
++    """A jump narrows the same result set the other filters do, rather than replacing it."""
++    assert await _names(lettered_mass, starts_from="s", search="tool", order_by="name") == ["Tool"]
++    assert not await _names(lettered_mass, starts_from="u", search="tool", order_by="name")
 +
 +
-+@pytest.mark.parametrize("value", ["ab", "", "1", "$", "aa"])
-+async def test_rejects_a_value_that_is_not_a_bucket(
++@pytest.mark.parametrize("value", ["ab", "1", "$", "#"])
++async def test_rejects_a_value_that_is_not_a_letter(
 +    lettered_mass: MusicAssistant, value: str
 +) -> None:
-+    """Anything that is not a single letter or the other bucket is refused, not ignored."""
-+    if not value:
-+        # an empty string is falsy and simply applies no filter, like the other filters
-+        assert await _names(lettered_mass, starts_with=value) == set(SEEDED_ARTISTS)
-+        return
-+    with pytest.raises(ValueError, match="starts_with"):
-+        await lettered_mass.music.artists.library_items(starts_with=value)
++    """Anything that is not a single letter is refused, not quietly ignored."""
++    with pytest.raises(ValueError, match="starts_from"):
++        await lettered_mass.music.artists.library_items(starts_from=value)
 +
 +
-+async def test_the_filter_reads_the_index_rather_than_scanning(
++async def test_an_empty_value_is_no_jump_at_all(lettered_mass: MusicAssistant) -> None:
++    """Falsy means the whole library, the same way the other filters read it."""
++    assert sorted(await _names(lettered_mass, starts_from="")) == sorted(SEEDED_ARTISTS)
++
++
++async def test_the_jump_reads_the_index_rather_than_scanning(
 +    lettered_mass: MusicAssistant,
 +) -> None:
 +    """
-+    The point of a range over the name column is that SQLite can seek into the index.
++    The point of a comparison on the name column is that SQLite can seek into the index.
 +
-+    A LIKE 'x%' would be correct too but leaves the planner free to scan the whole table,
-+    which is the case this filter exists to avoid on a library with thousands of rows.
++    A LIKE or a substr() would be correct too but leaves the planner free to scan the whole
++    table, which is the case this exists to avoid on a library with thousands of rows.
 +    """
 +    database = lettered_mass.music.database
 +    controller = lettered_mass.music.artists
@@ -566,7 +551,7 @@ index 000000000..442ae437a
 +        return result
 +
 +    with patch.object(database, "get_rows_from_query", spy):
-+        await controller.library_items(starts_with="t", order_by="sort_name")
++        await controller.library_items(starts_from="t", order_by="sort_name")
 +    plan_rows = await database.get_rows_from_query(
 +        f"EXPLAIN QUERY PLAN {captured['query']} LIMIT 500 OFFSET 0",
 +        captured["params"],

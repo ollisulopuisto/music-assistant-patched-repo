@@ -1,162 +1,230 @@
-From 2fa1f6156fd42e6cd64930387f2480657c77ffb3 Mon Sep 17 00:00:00 2001
+From af0ad7caada712883dd30f7a5e375b95523a7b0a Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
 Date: Wed, 23 Sep 2026 20:56:31 +0000
-Subject: [PATCH] Offer a jump to a first letter in every library listing
+Subject: [PATCH] Put an A-Z strip above every library listing
 
-Scrolling is currently the only way through a library listing, which pages 50
-items at a time - reaching T in a few thousand artists means dozens of loads,
-and the search box matches anywhere in a name so it cannot stand in for one.
+Scrolling is the only way through a library listing today: it pages 50 at a time,
+so the far end of the alphabet is dozens of loads away, and the search box matches
+anywhere in a name so it cannot stand in for one.
 
-Every library view gains a toolbar entry listing A-Z plus '#' for the items
-filed under no letter, so the whole alphabet is one click away and the buckets
-between them reach every item. Choosing the letter already showing clears it,
-like the other toggle filters.
+Every library view gains a strip under its toolbar - the whole alphabet visible at
+once, led by '#' for the top of the listing, where the names that start with a
+digit and the ones that reduce to nothing already sort. Picking a letter asks the
+server to start the listing there; the letters after it are still below, so
+scrolling carries on into them rather than stopping at the end of a bucket.
 
-The letter is sent to the server, which files items by whichever name the
-current sort uses - so the letters keep agreeing with the order on screen when
-you switch between name and sort name.
-
-The count endpoints take no letter, so a letter-filtered listing reports no
-total rather than the whole library's, the same way a provider-filtered one
-already does. Checked before the cached store count, which would otherwise be
-returned for a narrowed list.
+The strip marks where the listing begins. It does not yet follow the scroll: list
+view is virtualised and panel view is not, so tracking the topmost visible item
+needs two different mechanisms, and that is worth its own change rather than a
+fragile one bolted on here.
 
 Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01VpS6zTXcRdworxLZ6Dp1De
 ---
- src/components/ItemsListing.vue | 45 +++++++++++++++++++++++++++++++++
- src/plugins/api/index.ts        | 15 +++++++++++
- src/translations/en.json        |  1 +
- src/views/LibraryAlbums.vue     |  9 +++++++
- src/views/LibraryArtists.vue    |  9 +++++++
- src/views/LibraryAudiobooks.vue | 10 ++++++++
- src/views/LibraryGenres.vue     |  2 ++
- src/views/LibraryPlaylists.vue  |  9 +++++++
- src/views/LibraryPodcasts.vue   |  9 +++++++
- src/views/LibraryRadios.vue     |  9 +++++++
- src/views/LibraryTracks.vue     |  9 +++++++
- 11 files changed, 127 insertions(+)
+ src/components/AlphabetJumpBar.vue | 89 ++++++++++++++++++++++++++++++
+ src/components/ItemsListing.vue    | 25 +++++++++
+ src/plugins/api/index.ts           | 15 +++++
+ src/translations/en.json           |  1 +
+ src/views/LibraryAlbums.vue        |  9 +++
+ src/views/LibraryArtists.vue       |  9 +++
+ src/views/LibraryAudiobooks.vue    | 10 ++++
+ src/views/LibraryGenres.vue        |  2 +
+ src/views/LibraryPlaylists.vue     |  9 +++
+ src/views/LibraryPodcasts.vue      |  9 +++
+ src/views/LibraryRadios.vue        |  9 +++
+ src/views/LibraryTracks.vue        |  9 +++
+ 12 files changed, 196 insertions(+)
+ create mode 100644 src/components/AlphabetJumpBar.vue
 
+diff --git a/src/components/AlphabetJumpBar.vue b/src/components/AlphabetJumpBar.vue
+new file mode 100644
+index 0000000..2003064
+--- /dev/null
++++ b/src/components/AlphabetJumpBar.vue
+@@ -0,0 +1,89 @@
++<template>
++  <div
++    class="alphabet-jump-bar"
++    role="navigation"
++    :aria-label="$t('tooltip.jump_to_letter')"
++  >
++    <button
++      v-for="letter in letters"
++      :key="letter"
++      type="button"
++      class="alphabet-jump-bar__letter"
++      :class="{ 'alphabet-jump-bar__letter--active': letter === active }"
++      :aria-current="letter === active ? 'true' : undefined"
++      :disabled="disabled"
++      @click="emit('jump', letter === TOP ? undefined : letter.toLowerCase())"
++    >
++      {{ letter }}
++    </button>
++  </div>
++</template>
++
++<script setup lang="ts">
++/**
++ * The A-Z strip that jumps a long listing to a letter.
++ *
++ * Leading "#" is the top of the listing rather than a letter of its own: names that
++ * start with a digit, and names like "!!!" that reduce to nothing once punctuation is
++ * stripped, all sort above "a", so starting from the beginning is where they are.
++ */
++const TOP = "#";
++const letters = [TOP, ..."ABCDEFGHIJKLMNOPQRSTUVWXYZ"];
++
++defineProps<{
++  /** The letter to mark as where the listing currently is, if any. */
++  active?: string;
++  /** Greys the strip out while the listing it drives is busy. */
++  disabled?: boolean;
++}>();
++
++const emit = defineEmits<{
++  /** A letter was picked; undefined means the top of the listing. */
++  (e: "jump", letter: string | undefined): void;
++}>();
++</script>
++
++<style scoped>
++.alphabet-jump-bar {
++  display: flex;
++  align-items: center;
++  gap: 1px;
++  padding: 4px 10px;
++  /* a library with every letter still fits a phone: the strip scrolls rather than wraps,
++     so the listing below it never moves down a row */
++  overflow-x: auto;
++  scrollbar-width: none;
++}
++
++.alphabet-jump-bar::-webkit-scrollbar {
++  display: none;
++}
++
++.alphabet-jump-bar__letter {
++  flex: 1 0 auto;
++  min-width: 22px;
++  padding: 2px 0;
++  border-radius: 4px;
++  font-size: 0.75rem;
++  line-height: 1.25rem;
++  font-variant-numeric: tabular-nums;
++  color: rgb(var(--v-theme-on-surface));
++  opacity: 0.6;
++}
++
++.alphabet-jump-bar__letter:hover:not(:disabled) {
++  opacity: 1;
++  background-color: rgba(var(--v-theme-on-surface), 0.08);
++}
++
++.alphabet-jump-bar__letter--active {
++  opacity: 1;
++  font-weight: 700;
++  background-color: rgba(var(--v-theme-primary), 0.16);
++  color: rgb(var(--v-theme-primary));
++}
++
++.alphabet-jump-bar__letter:disabled {
++  opacity: 0.3;
++}
++</style>
 diff --git a/src/components/ItemsListing.vue b/src/components/ItemsListing.vue
-index 0786838..d131cc6 100644
+index 0786838..22e0823 100644
 --- a/src/components/ItemsListing.vue
 +++ b/src/components/ItemsListing.vue
-@@ -328,6 +328,7 @@ import {
- import { eventbus } from "@/plugins/eventbus";
- import { store } from "@/plugins/store";
- import {
-+  ArrowDownAZ,
-   ArrowUpDown,
-   CheckCheck,
-   ChevronDown,
-@@ -375,12 +376,23 @@ export interface ToolBarTab {
-   loadPagedData?: LoadPagedDataFn;
- }
+@@ -82,6 +82,13 @@
+       </Button>
+     </div>
  
-+// The buckets the first-letter filter offers. "#" collects everything the server files
-+// under no letter - names starting with a digit, and names like "!!!" that reduce to
-+// nothing once punctuation is stripped - so the strip as a whole reaches every item.
-+const FIRST_LETTER_OTHER = "#";
-+const FIRST_LETTER_BUCKETS = [
-+  FIRST_LETTER_OTHER,
-+  ..."ABCDEFGHIJKLMNOPQRSTUVWXYZ",
-+];
++    <AlphabetJumpBar
++      v-if="showAlphabetJump && expanded"
++      :active="activeJumpLetter"
++      :disabled="loading"
++      @jump="jumpToLetter"
++    />
 +
- export interface LoadDataParams {
-   offset: number;
-   limit: number;
+     <Container
+       v-if="expanded"
+       :variant="viewMode == 'list' ? 'default' : 'panel'"
+@@ -287,6 +294,7 @@
+ <script setup lang="ts">
+ import type { Component } from "vue";
+ 
++import AlphabetJumpBar from "@/components/AlphabetJumpBar.vue";
+ import Container from "@/components/Container.vue";
+ import GenreIcon from "@/components/icons/GenreIcon.vue";
+ import ListViewSkeleton from "@/components/skeletons/ListViewSkeleton.vue";
+@@ -381,6 +389,8 @@ export interface LoadDataParams {
    sortBy: string;
    search: string;
    genreIds?: number | number[];
-+  // a single letter, or "#" for the items filed under no letter at all
-+  startsWith?: string;
++  // the letter the listing starts at; everything after it is still in the listing
++  startsFrom?: string;
    favoritesOnly?: boolean;
    albumArtistsFilter?: boolean;
    libraryOnly?: boolean;
-@@ -433,6 +445,7 @@ export interface Props {
+@@ -433,6 +443,7 @@ export interface Props {
    emptyMessage?: string;
    showLibraryOnlyFilter?: boolean;
    showGenreFilter?: boolean;
-+  showFirstLetterFilter?: boolean;
++  showAlphabetJump?: boolean;
    showHideEmptyFilter?: boolean;
    showHideFullyPlayedFilter?: boolean;
    allowCollapse?: boolean;
-@@ -486,6 +499,7 @@ const props = withDefaults(defineProps<Props>(), {
+@@ -486,6 +497,7 @@ const props = withDefaults(defineProps<Props>(), {
    subtitle: undefined,
    showLibraryOnlyFilter: false,
    showGenreFilter: false,
-+  showFirstLetterFilter: false,
++  showAlphabetJump: false,
    showHideEmptyFilter: false,
    showHideFullyPlayedFilter: false,
    extraMenuItems: undefined,
-@@ -556,6 +570,7 @@ const params = ref<LoadDataParams>({
+@@ -556,6 +568,7 @@ const params = ref<LoadDataParams>({
    search: "",
    libraryOnly: false,
    genreIds: undefined,
-+  startsWith: undefined,
++  startsFrom: undefined,
  });
  const viewMode = ref("list");
  const showSearch = ref(false);
-@@ -938,6 +953,13 @@ const changeSort = function (sort_key?: string) {
+@@ -938,6 +951,17 @@ const changeSort = function (sort_key?: string) {
    loadData(undefined, undefined, true);
  };
  
-+const changeFirstLetterFilter = function (letter: string) {
-+  // clicking the letter you are already on clears it, like the other toggle filters
-+  params.value.startsWith =
-+    params.value.startsWith === letter ? undefined : letter;
++// The letter the strip marks. The listing runs from here to the end of the library, so
++// this is where it begins rather than where the scroll happens to be; "#" is the top.
++const activeJumpLetter = computed(() =>
++  params.value.startsFrom ? params.value.startsFrom.toUpperCase() : "#",
++);
++
++const jumpToLetter = function (letter: string | undefined) {
++  params.value.startsFrom = letter;
 +  loadData(undefined, undefined, true);
 +};
 +
  const changeAlbumTypeFilter = function (albumType: string) {
    if (params.value.albumType?.includes(albumType))
      params.value.albumType = params.value.albumType?.filter(
-@@ -1068,6 +1090,7 @@ const hasActiveFilters = computed(() => {
+@@ -1068,6 +1092,7 @@ const hasActiveFilters = computed(() => {
      (!props.requireProviderSelection && p.provider && p.provider.length > 0) ||
      (p.albumType && p.albumType.length > 0) ||
      genreActive ||
-+    Boolean(p.startsWith) ||
++    Boolean(p.startsFrom) ||
      // hide-empty genres filter: true (hide empty) and null (defaults only)
      // both narrow the result; false/undefined means "show all"
      p.hideEmptyFilter === true ||
-@@ -1443,6 +1466,28 @@ const menuItems = computed(() => {
-     });
-   }
- 
-+  // jump to a first letter: a big library is many pages deep, and scrolling is the
-+  // only way to reach the far end of the alphabet without it
-+  if (props.showFirstLetterFilter === true) {
-+    items.push({
-+      label: "tooltip.filter_first_letter",
-+      icon: ArrowDownAZ,
-+      disabled: loading.value,
-+      active: params.value.startsWith !== undefined,
-+      closeOnContentClick: false,
-+      overflowAllowed: true,
-+      subItems: FIRST_LETTER_BUCKETS.map((letter) => {
-+        return {
-+          // a bare letter is not a translation key; $t falls through to it unchanged,
-+          // the same way the genre filter passes raw genre names
-+          label: letter,
-+          selected: params.value.startsWith === letter.toLowerCase(),
-+          action: () => changeFirstLetterFilter(letter.toLowerCase()),
-+        };
-+      }),
-+    });
-+  }
-+
-   // toggle search (auto-hidden for small listings)
-   if (searchAvailable.value) {
-     items.push({
 diff --git a/src/plugins/api/index.ts b/src/plugins/api/index.ts
-index 16edcc5..b8ee564 100644
+index 16edcc5..43f931f 100644
 --- a/src/plugins/api/index.ts
 +++ b/src/plugins/api/index.ts
 @@ -512,6 +512,7 @@ export class MusicAssistantApi {
      order_by?: string,
      provider?: string | string[],
      genre?: number | number[],
-+    starts_with?: string,
++    starts_from?: string,
    ): Promise<Track[]> {
      return this.sendCommand("music/tracks/library_items", {
        favorite,
@@ -164,7 +232,7 @@ index 16edcc5..b8ee564 100644
        order_by,
        provider,
        genre,
-+      starts_with,
++      starts_from,
      });
    }
  
@@ -172,7 +240,7 @@ index 16edcc5..b8ee564 100644
      provider?: string | string[],
      genre?: number | number[],
      artist_type?: ArtistType,
-+    starts_with?: string,
++    starts_from?: string,
    ): Promise<Artist[]> {
      return this.sendCommand("music/artists/library_items", {
        favorite,
@@ -180,7 +248,7 @@ index 16edcc5..b8ee564 100644
        provider,
        genre,
        artist_type,
-+      starts_with,
++      starts_from,
      });
    }
  
@@ -188,7 +256,7 @@ index 16edcc5..b8ee564 100644
      album_types?: Array<AlbumType | string>,
      provider?: string | string[],
      genre?: number | number[],
-+    starts_with?: string,
++    starts_from?: string,
    ): Promise<Album[]> {
      return this.sendCommand("music/albums/library_items", {
        favorite,
@@ -196,7 +264,7 @@ index 16edcc5..b8ee564 100644
        album_types,
        provider,
        genre,
-+      starts_with,
++      starts_from,
      });
    }
  
@@ -204,7 +272,7 @@ index 16edcc5..b8ee564 100644
      order_by?: string,
      provider?: string | string[],
      genre?: number | number[],
-+    starts_with?: string,
++    starts_from?: string,
    ): Promise<Playlist[]> {
      return this.sendCommand("music/playlists/library_items", {
        favorite,
@@ -212,7 +280,7 @@ index 16edcc5..b8ee564 100644
        order_by,
        provider,
        genre,
-+      starts_with,
++      starts_from,
      });
    }
  
@@ -220,7 +288,7 @@ index 16edcc5..b8ee564 100644
      order_by?: string,
      provider?: string | string[],
      genre?: number | number[],
-+    starts_with?: string,
++    starts_from?: string,
    ): Promise<Radio[]> {
      return this.sendCommand("music/radios/library_items", {
        favorite,
@@ -228,7 +296,7 @@ index 16edcc5..b8ee564 100644
        order_by,
        provider,
        genre,
-+      starts_with,
++      starts_from,
      });
    }
  
@@ -236,7 +304,7 @@ index 16edcc5..b8ee564 100644
      provider?: string | string[],
      genre?: number | number[],
      collapse_collections?: boolean,
-+    starts_with?: string,
++    starts_from?: string,
    ): Promise<(Audiobook | MediaCollection<Audiobook>)[]> {
      return this.sendCommand("music/audiobooks/library_items", {
        favorite,
@@ -244,7 +312,7 @@ index 16edcc5..b8ee564 100644
        provider,
        genre,
        collapse_collections,
-+      starts_with,
++      starts_from,
      });
    }
  
@@ -252,7 +320,7 @@ index 16edcc5..b8ee564 100644
      order_by?: string,
      provider?: string | string[],
      genre?: number | number[],
-+    starts_with?: string,
++    starts_from?: string,
    ): Promise<Podcast[]> {
      return this.sendCommand("music/podcasts/library_items", {
        favorite,
@@ -260,7 +328,7 @@ index 16edcc5..b8ee564 100644
        order_by,
        provider,
        genre,
-+      starts_with,
++      starts_from,
      });
    }
  
@@ -268,31 +336,31 @@ index 16edcc5..b8ee564 100644
      opts: {
        favorite?: boolean;
        search?: string;
-+      starts_with?: string;
++      starts_from?: string;
        limit?: number;
        offset?: number;
        order_by?: string;
 diff --git a/src/translations/en.json b/src/translations/en.json
-index a00432b..9d8495a 100644
+index a00432b..01077fd 100644
 --- a/src/translations/en.json
 +++ b/src/translations/en.json
 @@ -889,6 +889,7 @@
          "hide_empty_genres": "Hide empty genres",
          "show_empty_genres": "Show empty genres",
          "filter_genre": "Filter by genre",
-+        "filter_first_letter": "Jump to a letter",
++        "jump_to_letter": "Jump to a letter",
          "show_only_default_genres": "Show only default genres",
          "show_all_genres": "Show all genres",
          "filter_hide_fully_played": "Hide fully-played episodes",
 diff --git a/src/views/LibraryAlbums.vue b/src/views/LibraryAlbums.vue
-index 5df1001..5fdbef9 100644
+index 5df1001..c0db189 100644
 --- a/src/views/LibraryAlbums.vue
 +++ b/src/views/LibraryAlbums.vue
 @@ -6,6 +6,7 @@
      :show-favorites-only-filter="true"
      :load-paged-data="loadItems"
      :sort-keys="sortKeys"
-+    :show-first-letter-filter="true"
++    :show-alphabet-jump="true"
      :update-available="updateAvailable"
      :title="$t('albums')"
      :allow-key-hooks="true"
@@ -300,7 +368,7 @@ index 5df1001..5fdbef9 100644
      params.albumType,
      params.provider && params.provider.length > 0 ? params.provider : undefined,
      params.genreIds,
-+    params.startsWith,
++    params.startsFrom,
    );
  };
  
@@ -308,7 +376,7 @@ index 5df1001..5fdbef9 100644
 +  // the count endpoints take no first letter, so a letter-filtered listing has no
 +  // knowable total - same as the provider filter below. Checked first, or the
 +  // unfiltered store count would be reported for a filtered list.
-+  if (params.startsWith) {
++  if (params.startsFrom) {
 +    total.value = undefined;
 +    return;
 +  }
@@ -316,14 +384,14 @@ index 5df1001..5fdbef9 100644
      total.value = store.libraryAlbumsCount;
      return;
 diff --git a/src/views/LibraryArtists.vue b/src/views/LibraryArtists.vue
-index 235421f..30447ad 100644
+index 235421f..640e4de 100644
 --- a/src/views/LibraryArtists.vue
 +++ b/src/views/LibraryArtists.vue
 @@ -12,6 +12,7 @@
      :show-search-button="true"
      :show-genre-filter="true"
      :sort-keys="sortKeys"
-+    :show-first-letter-filter="true"
++    :show-alphabet-jump="true"
      :icon="ArtistIcon"
      :restore-state="true"
      :total="total"
@@ -331,7 +399,7 @@ index 235421f..30447ad 100644
      params.provider && params.provider.length > 0 ? params.provider : undefined,
      params.genreIds,
      ArtistType.SINGER,
-+    params.startsWith,
++    params.startsFrom,
    );
  };
  
@@ -339,7 +407,7 @@ index 235421f..30447ad 100644
 +  // the count endpoints take no first letter, so a letter-filtered listing has no
 +  // knowable total - same as the provider filter below. Checked first, or the
 +  // unfiltered store count would be reported for a filtered list.
-+  if (params.startsWith) {
++  if (params.startsFrom) {
 +    total.value = undefined;
 +    return;
 +  }
@@ -347,14 +415,14 @@ index 235421f..30447ad 100644
    // The total will be determined by the actual results returned
    if (params.provider && params.provider.length > 0) {
 diff --git a/src/views/LibraryAudiobooks.vue b/src/views/LibraryAudiobooks.vue
-index b60ddfc..f9158db 100644
+index b60ddfc..4e83d60 100644
 --- a/src/views/LibraryAudiobooks.vue
 +++ b/src/views/LibraryAudiobooks.vue
 @@ -8,6 +8,7 @@
      :load-paged-data="loadItems"
      :show-library="true"
      :sort-keys="sortKeys"
-+    :show-first-letter-filter="true"
++    :show-alphabet-jump="true"
      :update-available="updateAvailable"
      :title="$t('audiobooks')"
      :allow-key-hooks="true"
@@ -362,7 +430,7 @@ index b60ddfc..f9158db 100644
      params.provider && params.provider.length > 0 ? params.provider : undefined,
      params.genreIds,
      params.collapseCollections,
-+    params.startsWith,
++    params.startsFrom,
    );
  };
  
@@ -370,7 +438,7 @@ index b60ddfc..f9158db 100644
      params.provider && params.provider.length > 0 ? params.provider : undefined,
      params.genreIds,
      artistType,
-+    params.startsWith,
++    params.startsFrom,
    );
  };
  
@@ -381,7 +449,7 @@ index b60ddfc..f9158db 100644
 +  // the count endpoints take no first letter, so a letter-filtered listing has no
 +  // knowable total - same as the provider filter below. Checked first, or the
 +  // unfiltered store count would be reported for a filtered list.
-+  if (params.startsWith) {
++  if (params.startsFrom) {
 +    total.value = undefined;
 +    return;
 +  }
@@ -389,14 +457,14 @@ index b60ddfc..f9158db 100644
    // The total will be determined by the actual results returned
    if (params.provider && params.provider.length > 0) {
 diff --git a/src/views/LibraryGenres.vue b/src/views/LibraryGenres.vue
-index ae8eec5..78d7096 100644
+index ae8eec5..d8be35e 100644
 --- a/src/views/LibraryGenres.vue
 +++ b/src/views/LibraryGenres.vue
 @@ -19,6 +19,7 @@
      :allow-collapse="true"
      :hide-on-empty="false"
      :sort-keys="sortKeys"
-+    :show-first-letter-filter="true"
++    :show-alphabet-jump="true"
      :limit="50"
      :infinite-scroll="false"
      :load-paged-data="section.load"
@@ -404,19 +472,19 @@ index ae8eec5..78d7096 100644
        content_type: contentType,
        favorite: params.favoritesOnly || undefined,
        search: params.search,
-+      starts_with: params.startsWith,
++      starts_from: params.startsFrom,
        limit: params.limit,
        offset: params.offset,
        order_by: params.sortBy,
 diff --git a/src/views/LibraryPlaylists.vue b/src/views/LibraryPlaylists.vue
-index 9505316..4426613 100644
+index 9505316..523567a 100644
 --- a/src/views/LibraryPlaylists.vue
 +++ b/src/views/LibraryPlaylists.vue
 @@ -9,6 +9,7 @@
      :load-paged-data="loadItems"
      :show-library="true"
      :sort-keys="sortKeys"
-+    :show-first-letter-filter="true"
++    :show-alphabet-jump="true"
      :update-available="updateAvailable"
      :title="$t('playlists')"
      :allow-key-hooks="true"
@@ -424,7 +492,7 @@ index 9505316..4426613 100644
      params.sortBy,
      params.provider && params.provider.length > 0 ? params.provider : undefined,
      params.genreIds,
-+    params.startsWith,
++    params.startsFrom,
    );
  };
  
@@ -432,7 +500,7 @@ index 9505316..4426613 100644
 +  // the count endpoints take no first letter, so a letter-filtered listing has no
 +  // knowable total - same as the provider filter below. Checked first, or the
 +  // unfiltered store count would be reported for a filtered list.
-+  if (params.startsWith) {
++  if (params.startsFrom) {
 +    total.value = undefined;
 +    return;
 +  }
@@ -440,14 +508,14 @@ index 9505316..4426613 100644
      total.value = store.libraryPlaylistsCount;
      return;
 diff --git a/src/views/LibraryPodcasts.vue b/src/views/LibraryPodcasts.vue
-index 7afe3d2..a61c87f 100644
+index 7afe3d2..a504ae7 100644
 --- a/src/views/LibraryPodcasts.vue
 +++ b/src/views/LibraryPodcasts.vue
 @@ -8,6 +8,7 @@
      :load-paged-data="loadItems"
      :show-library="true"
      :sort-keys="sortKeys"
-+    :show-first-letter-filter="true"
++    :show-alphabet-jump="true"
      :update-available="updateAvailable"
      :title="$t('podcasts')"
      :allow-key-hooks="true"
@@ -455,7 +523,7 @@ index 7afe3d2..a61c87f 100644
      params.sortBy,
      params.provider && params.provider.length > 0 ? params.provider : undefined,
      params.genreIds,
-+    params.startsWith,
++    params.startsFrom,
    );
  };
  
@@ -463,7 +531,7 @@ index 7afe3d2..a61c87f 100644
 +  // the count endpoints take no first letter, so a letter-filtered listing has no
 +  // knowable total - same as the provider filter below. Checked first, or the
 +  // unfiltered store count would be reported for a filtered list.
-+  if (params.startsWith) {
++  if (params.startsFrom) {
 +    total.value = undefined;
 +    return;
 +  }
@@ -471,14 +539,14 @@ index 7afe3d2..a61c87f 100644
      total.value = store.libraryPodcastsCount;
      return;
 diff --git a/src/views/LibraryRadios.vue b/src/views/LibraryRadios.vue
-index 6e27292..c71b9d5 100644
+index 6e27292..63ae086 100644
 --- a/src/views/LibraryRadios.vue
 +++ b/src/views/LibraryRadios.vue
 @@ -8,6 +8,7 @@
      :show-favorites-only-filter="true"
      :load-paged-data="loadItems"
      :sort-keys="sortKeys"
-+    :show-first-letter-filter="true"
++    :show-alphabet-jump="true"
      :update-available="updateAvailable"
      :title="$t('radios')"
      :show-search-button="true"
@@ -486,7 +554,7 @@ index 6e27292..c71b9d5 100644
      params.sortBy,
      params.provider && params.provider.length > 0 ? params.provider : undefined,
      params.genreIds,
-+    params.startsWith,
++    params.startsFrom,
    );
  };
  
@@ -494,7 +562,7 @@ index 6e27292..c71b9d5 100644
 +  // the count endpoints take no first letter, so a letter-filtered listing has no
 +  // knowable total - same as the provider filter below. Checked first, or the
 +  // unfiltered store count would be reported for a filtered list.
-+  if (params.startsWith) {
++  if (params.startsFrom) {
 +    total.value = undefined;
 +    return;
 +  }
@@ -502,14 +570,14 @@ index 6e27292..c71b9d5 100644
      total.value = store.libraryRadiosCount;
      return;
 diff --git a/src/views/LibraryTracks.vue b/src/views/LibraryTracks.vue
-index c688af3..d038e0f 100644
+index c688af3..0791207 100644
 --- a/src/views/LibraryTracks.vue
 +++ b/src/views/LibraryTracks.vue
 @@ -8,6 +8,7 @@
      :show-track-number="false"
      :load-paged-data="loadItems"
      :sort-keys="sortKeys"
-+    :show-first-letter-filter="true"
++    :show-alphabet-jump="true"
      :show-album="true"
      :update-available="updateAvailable"
      :title="$t('tracks')"
@@ -517,7 +585,7 @@ index c688af3..d038e0f 100644
      params.sortBy,
      params.provider && params.provider.length > 0 ? params.provider : undefined,
      params.genreIds,
-+    params.startsWith,
++    params.startsFrom,
    );
  };
  
@@ -525,7 +593,7 @@ index c688af3..d038e0f 100644
 +  // the count endpoints take no first letter, so a letter-filtered listing has no
 +  // knowable total - same as the provider filter below. Checked first, or the
 +  // unfiltered store count would be reported for a filtered list.
-+  if (params.startsWith) {
++  if (params.startsFrom) {
 +    total.value = undefined;
 +    return;
 +  }
