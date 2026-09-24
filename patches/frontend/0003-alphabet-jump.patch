@@ -1,7 +1,7 @@
 From 9282c0614f6f36ded97b25dc38d22aed48522532 Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
 Date: Wed, 23 Sep 2026 20:56:31 +0000
-Subject: [PATCH 1/2] Put an A-Z strip above every library listing
+Subject: [PATCH 1/3] Put an A-Z strip above every library listing
 
 Scrolling is the only way through a library listing today: it pages 50 at a time,
 so the far end of the alphabet is dozens of loads away, and the search box matches
@@ -813,7 +813,7 @@ index c688af3..83e2998 100644
 From f09a98abc6cf6a4a1bde9d30b85e9770cf0cf4e5 Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
 Date: Thu, 24 Sep 2026 05:33:32 +0000
-Subject: [PATCH 2/2] Follow the scroll with the A-Z strip
+Subject: [PATCH 2/3] Follow the scroll with the A-Z strip
 
 The strip marked where the listing began, which stopped being the answer as soon as
 you scrolled: browsing from K into L left K lit.
@@ -1017,6 +1017,311 @@ index 447e4bb..77da13b 100644
 +  const first = normalised.charAt(0);
 +  return first >= "a" && first <= "z" ? first.toUpperCase() : TOP_BUCKET;
 +}
+-- 
+2.43.0
+
+
+From fe6cc69a15e29ba3008b829219cfd7d7fe8f7f9a Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 24 Sep 2026 06:34:27 +0000
+Subject: [PATCH 3/3] Send the listing back to the top when a letter is picked,
+ and pin its header
+
+Picking a letter replaced the listing's contents but left the reader at their
+old scroll offset, so a jump to R landed somewhere in T. Scroll the listing
+back under them once the new page is in. A jump also overtakes any earlier
+page still in flight for the letter being left, whose items would otherwise be
+prepended onto the new listing.
+
+The strip pinned itself while the toolbar above it scrolled away, leaving
+search and the filter menu a scroll from the top. The listings that carry a
+strip are the long ones, so their whole header travels with the reader
+instead.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01VpS6zTXcRdworxLZ6Dp1De
+---
+ src/components/ItemsListing.vue | 213 +++++++++++++++++++-------------
+ 1 file changed, 130 insertions(+), 83 deletions(-)
+
+diff --git a/src/components/ItemsListing.vue b/src/components/ItemsListing.vue
+index 5d78ff0..3372403 100644
+--- a/src/components/ItemsListing.vue
++++ b/src/components/ItemsListing.vue
+@@ -1,95 +1,103 @@
+ <!-- eslint-disable vue/no-v-for-template-key-on-child -->
+ <template>
+-  <section v-if="!(hideOnEmpty && pagedItems.length == 0 && !hasActiveFilters)">
++  <section
++    v-if="!(hideOnEmpty && pagedItems.length == 0 && !hasActiveFilters)"
++    ref="listingRef"
++  >
+     <!-- eslint-disable vue/no-template-shadow -->
+-    <Toolbar
+-      :icon="icon"
+-      :icon-action="iconAction"
+-      :title="title"
+-      :subtitle="subtitle"
+-      :count="params.search ? pagedItems.length : total || allItems.length"
+-      color="transparent"
+-      :menu-items="menuItems"
+-      :enforce-overflow-menu="true"
+-      :menu-active="hasActiveFilters"
+-      @title-clicked="toggleExpand"
++    <div
++      class="listing-header"
++      :class="{ 'listing-header--pinned': alphabetJumpAvailable && expanded }"
+     >
+-      <template #title>
+-        <slot name="title">{{ title }}</slot>
+-      </template>
++      <Toolbar
++        :icon="icon"
++        :icon-action="iconAction"
++        :title="title"
++        :subtitle="subtitle"
++        :count="params.search ? pagedItems.length : total || allItems.length"
++        color="transparent"
++        :menu-items="menuItems"
++        :enforce-overflow-menu="true"
++        :menu-active="hasActiveFilters"
++        @title-clicked="toggleExpand"
++      >
++        <template #title>
++          <slot name="title">{{ title }}</slot>
++        </template>
+ 
+-      <template v-if="!store.mobileLayout" #append>
+-        <Transition name="listing-search">
+-          <div v-if="showSearchInput" class="listing-search-slot">
+-            <SearchInput
+-              ref="searchInputRef"
+-              v-model="params.search"
+-              clearable
+-              class="listing-search listing-search--inline w-(--listing-search-width) shrink-0"
+-              :placeholder="searchLabel"
+-              :aria-label="searchLabel"
+-              @focus="searchHasFocus = true"
+-              @blur="searchHasFocus = false"
+-            />
+-          </div>
+-        </Transition>
+-      </template>
+-    </Toolbar>
++        <template v-if="!store.mobileLayout" #append>
++          <Transition name="listing-search">
++            <div v-if="showSearchInput" class="listing-search-slot">
++              <SearchInput
++                ref="searchInputRef"
++                v-model="params.search"
++                clearable
++                class="listing-search listing-search--inline w-(--listing-search-width) shrink-0"
++                :placeholder="searchLabel"
++                :aria-label="searchLabel"
++                @focus="searchHasFocus = true"
++                @blur="searchHasFocus = false"
++              />
++            </div>
++          </Transition>
++        </template>
++      </Toolbar>
+ 
+-    <v-divider />
++      <v-divider />
+ 
+-    <div v-if="props.toolBarTabs !== undefined" class="content-tabs">
+-      <Tabs
+-        :model-value="activeTabId"
+-        class="items-start"
+-        @update:model-value="(v) => onTabChange(v as string)"
++      <div v-if="props.toolBarTabs !== undefined" class="content-tabs">
++        <Tabs
++          :model-value="activeTabId"
++          class="items-start"
++          @update:model-value="(v) => onTabChange(v as string)"
++        >
++          <TabsList variant="line">
++            <TabsTrigger
++              v-for="tab in props.toolBarTabs"
++              :key="tab.id"
++              :value="tab.id"
++            >
++              {{ tab.label }}
++            </TabsTrigger>
++          </TabsList>
++        </Tabs>
++      </div>
++
++      <div
++        v-if="showSearchInput && store.mobileLayout"
++        class="mx-2.5 mt-2.5 flex items-center gap-1"
+       >
+-        <TabsList variant="line">
+-          <TabsTrigger
+-            v-for="tab in props.toolBarTabs"
+-            :key="tab.id"
+-            :value="tab.id"
+-          >
+-            {{ tab.label }}
+-          </TabsTrigger>
+-        </TabsList>
+-      </Tabs>
+-    </div>
+-
+-    <div
+-      v-if="showSearchInput && store.mobileLayout"
+-      class="mx-2.5 mt-2.5 flex items-center gap-1"
+-    >
+-      <SearchInput
+-        ref="searchInputRef"
+-        v-model="params.search"
+-        clearable
+-        class="listing-search listing-search--row min-w-0 flex-1"
+-        :placeholder="searchLabel"
+-        :aria-label="searchLabel"
+-        @focus="searchHasFocus = true"
+-        @blur="searchHasFocus = false"
++        <SearchInput
++          ref="searchInputRef"
++          v-model="params.search"
++          clearable
++          class="listing-search listing-search--row min-w-0 flex-1"
++          :placeholder="searchLabel"
++          :aria-label="searchLabel"
++          @focus="searchHasFocus = true"
++          @blur="searchHasFocus = false"
++        />
++        <Button
++          variant="ghost"
++          size="icon"
++          class="size-10 shrink-0"
++          :aria-label="$t('close')"
++          :title="$t('close')"
++          @click="closeSearch"
++        >
++          <X class="size-[22px]" />
++        </Button>
++      </div>
++
++      <AlphabetJumpBar
++        v-if="alphabetJumpAvailable && expanded"
++        ref="jumpBarRef"
++        :active="activeJumpLetter"
++        :disabled="loading"
++        @jump="jumpToLetter"
+       />
+-      <Button
+-        variant="ghost"
+-        size="icon"
+-        class="size-10 shrink-0"
+-        :aria-label="$t('close')"
+-        :title="$t('close')"
+-        @click="closeSearch"
+-      >
+-        <X class="size-[22px]" />
+-      </Button>
+     </div>
+ 
+-    <AlphabetJumpBar
+-      v-if="alphabetJumpAvailable && expanded"
+-      ref="jumpBarRef"
+-      :active="activeJumpLetter"
+-      :disabled="loading"
+-      @jump="jumpToLetter"
+-    />
+-
+     <Container
+       v-if="expanded"
+       :variant="viewMode == 'list' ? 'default' : 'panel'"
+@@ -597,6 +605,7 @@ const showSearch = ref(false);
+ const searchHasFocus = ref(false);
+ const searchInputRef = ref<InstanceType<typeof SearchInput>>();
+ const jumpBarRef = ref<InstanceType<typeof AlphabetJumpBar>>();
++const listingRef = ref<HTMLElement>();
+ const listingMediaType = computed(() => MEDIA_TYPE_BY_ITEMTYPE[props.itemtype]);
+ const searchLabel = computed(() => {
+   const mediaType = listingMediaType.value;
+@@ -1027,13 +1036,30 @@ const onScrollProbeLetter = function () {
+   });
+ };
+ 
+-const jumpToLetter = function (letter: string | undefined) {
++const jumpToLetter = async function (letter: string | undefined) {
+   params.value.startsFrom = letter;
+   earlierOffset.value = 0;
+   earliestReached.value = false;
++  // an earlier page may still be in flight for the letter we are leaving; its items
++  // would land on top of the new listing, so let it know it has been overtaken
++  jumpGeneration += 1;
+   // the letter just picked marks the strip until the next scroll says otherwise
+   scrolledToLetter.value = undefined;
+-  loadData(undefined, undefined, true);
++  await loadData(undefined, undefined, true);
++  // the listing was replaced under a reader who is somewhere down the old one: without
++  // this they keep their offset and land in the middle of the letter they picked
++  await nextTick();
++  scrollListingIntoView();
++};
++
++/** Bring the top of the listing back under the reader after its contents were replaced. */
++const scrollListingIntoView = function () {
++  const scroller = scrollParent();
++  const listing = listingRef.value;
++  if (!scroller || !listing) return;
++  const offset =
++    listing.getBoundingClientRect().top - scroller.getBoundingClientRect().top;
++  if (offset) scroller.scrollTop += offset;
+ };
+ 
+ const changeAlbumTypeFilter = function (albumType: string) {
+@@ -1112,6 +1138,8 @@ const redirectSearch = function () {
+ // reached the top. Counted separately from params.offset, which only ever runs forward.
+ const earlierOffset = ref(0);
+ const earliestReached = ref(false);
++// bumped by every jump, so a page fetched for the previous letter can tell it is stale
++let jumpGeneration = 0;
+ 
+ /**
+  * Load the page of items immediately before the ones on screen and put it above them.
+@@ -1125,12 +1153,15 @@ const loadEarlierPage = async function (): Promise<boolean> {
+   const startsFrom = params.value.startsFrom;
+   if (!loadPagedData || !startsFrom || earliestReached.value) return false;
+ 
++  const generation = jumpGeneration;
+   const earlier = await loadPagedData(
+     earlierPageParams(
+       { ...params.value, limit: props.limit },
+       earlierOffset.value,
+     ),
+   );
++  // a jump landed while this was in flight: these items belong to the letter we left
++  if (generation !== jumpGeneration) return false;
+ 
+   if (earlier.length < props.limit) earliestReached.value = true;
+   if (!earlier.length) return false;
+@@ -2398,6 +2429,22 @@ async function selectEveryItem() {
+ </script>
+ 
+ <style scoped>
++/* The listings that carry an A-Z strip are the ones long enough to get lost in, so their
++   whole header travels with the reader: title, search and filters stay one click away
++   instead of being a scroll back to the top. */
++.listing-header--pinned {
++  position: sticky;
++  top: 0;
++  z-index: 3;
++  background-color: rgb(var(--v-theme-surface));
++}
++
++/* the strip pins itself when it stands alone; inside a pinned header it is already
++   carried along, and its own sticky would lift it over the toolbar */
++.listing-header--pinned :deep(.alphabet-jump-bar) {
++  position: static;
++}
++
+ .listing-search-slot {
+   --listing-search-width: clamp(0px, calc(100vw - 560px), 280px);
+   display: flex;
 -- 
 2.43.0
 
