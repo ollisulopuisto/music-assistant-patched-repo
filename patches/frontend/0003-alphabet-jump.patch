@@ -1,16 +1,18 @@
 From 9282c0614f6f36ded97b25dc38d22aed48522532 Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
 Date: Wed, 23 Sep 2026 20:56:31 +0000
-Subject: [PATCH 1/3] Put an A-Z strip above every library listing
+Subject: [PATCH 1/3] Add an A-Z strip to selected library listings
 
 Scrolling is the only way through a library listing today: it pages 50 at a time,
 so the far end of the alphabet is dozens of loads away, and the search box matches
 anywhere in a name so it cannot stand in for one.
 
-Every library view gains a strip pinned under its toolbar - the whole alphabet
-visible at once, led by '#' for the top of the listing, where the names that start
-with a digit and the ones that reduce to nothing already sort. Picking a letter
-asks the server to start the listing there.
+Library views that support a name order gain a strip pinned under the toolbar - the
+whole alphabet visible at once, led by '#' for the top of the listing, where names
+that start with a digit and names that reduce to nothing already sort. Picking a
+letter asks the server to start the listing there. Radios use display-name order so
+the server boundary matches the visible name. Playlists, tracks and podcasts keep
+their headers pinned but omit the strip while their paging or jumps are unreliable.
 
 Scrolling then works in both directions. Down needs nothing new: the letters after
 the jump are still in the listing. Up asks for the mirror - the items before the
@@ -196,19 +198,21 @@ index 0786838..f512953 100644
    favoritesOnly?: boolean;
    albumArtistsFilter?: boolean;
    libraryOnly?: boolean;
-@@ -433,6 +448,7 @@ export interface Props {
+@@ -433,6 +448,8 @@ export interface Props {
    emptyMessage?: string;
    showLibraryOnlyFilter?: boolean;
    showGenreFilter?: boolean;
 +  showAlphabetJump?: boolean;
++  pinListingHeader?: boolean;
    showHideEmptyFilter?: boolean;
    showHideFullyPlayedFilter?: boolean;
    allowCollapse?: boolean;
-@@ -486,6 +502,7 @@ const props = withDefaults(defineProps<Props>(), {
+@@ -486,6 +502,8 @@ const props = withDefaults(defineProps<Props>(), {
    subtitle: undefined,
    showLibraryOnlyFilter: false,
    showGenreFilter: false,
 +  showAlphabetJump: false,
++  pinListingHeader: false,
    showHideEmptyFilter: false,
    showHideFullyPlayedFilter: false,
    extraMenuItems: undefined,
@@ -686,7 +690,7 @@ index 9505316..40bdc3a 100644
      :load-paged-data="loadItems"
      :show-library="true"
      :sort-keys="sortKeys"
-+    :show-alphabet-jump="true"
++    :pin-listing-header="true"
      :update-available="updateAvailable"
      :title="$t('playlists')"
      :allow-key-hooks="true"
@@ -718,7 +722,7 @@ index 7afe3d2..c3e4f7b 100644
      :load-paged-data="loadItems"
      :show-library="true"
      :sort-keys="sortKeys"
-+    :show-alphabet-jump="true"
++    :pin-listing-header="true"
      :update-available="updateAvailable"
      :title="$t('podcasts')"
      :allow-key-hooks="true"
@@ -754,6 +758,18 @@ index 6e27292..ecd928b 100644
      :update-available="updateAvailable"
      :title="$t('radios')"
      :show-search-button="true"
+@@ -47,11 +48,9 @@ const sortKeys = [
+   "name",
+   "name_desc",
+-  "sort_name",
+-  "sort_name_desc",
+   "timestamp_added",
+   "timestamp_added_desc",
+   "last_played",
+   "last_played_desc",
+   "play_count",
+   "play_count_desc",
+ ];
 @@ -111,10 +112,19 @@ const loadItems = async function (params: LoadDataParams) {
      params.sortBy,
      params.provider && params.provider.length > 0 ? params.provider : undefined,
@@ -782,7 +798,7 @@ index c688af3..83e2998 100644
      :show-track-number="false"
      :load-paged-data="loadItems"
      :sort-keys="sortKeys"
-+    :show-alphabet-jump="true"
++    :pin-listing-header="true"
      :show-album="true"
      :update-available="updateAvailable"
      :title="$t('tracks')"
@@ -1035,8 +1051,7 @@ prepended onto the new listing.
 
 The strip pinned itself while the toolbar above it scrolled away, leaving
 search and the filter menu a scroll from the top. The listings that carry a
-strip are the long ones, so their whole header travels with the reader
-instead.
+strip, along with views that opt in, keep their whole header with the reader.
 
 Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01VpS6zTXcRdworxLZ6Dp1De
@@ -1048,7 +1063,7 @@ diff --git a/src/components/ItemsListing.vue b/src/components/ItemsListing.vue
 index 5d78ff0..3372403 100644
 --- a/src/components/ItemsListing.vue
 +++ b/src/components/ItemsListing.vue
-@@ -1,4 +1,11 @@
+@@ -1,4 +1,14 @@
  <!-- eslint-disable vue/no-v-for-template-key-on-child -->
  <template>
 -  <section v-if="!(hideOnEmpty && pagedItems.length == 0 && !hasActiveFilters)">
@@ -1058,7 +1073,10 @@ index 5d78ff0..3372403 100644
 +  >
 +    <div
 +      class="listing-header"
-+      :class="{ 'listing-header--pinned': alphabetJumpAvailable && expanded }"
++      :class="{
++        'listing-header--pinned':
++          (alphabetJumpAvailable || props.pinListingHeader) && expanded,
++      }"
 +    >
      <!-- eslint-disable vue/no-template-shadow -->
 @@ -94,1 +101,2 @@
@@ -1135,13 +1153,12 @@ index 5d78ff0..3372403 100644
  
    if (earlier.length < props.limit) earliestReached.value = true;
    if (!earlier.length) return false;
-@@ -2398,6 +2429,22 @@ async function selectEveryItem() {
+@@ -2398,6 +2429,21 @@ async function selectEveryItem() {
  </script>
  
  <style scoped>
-+/* The listings that carry an A-Z strip are the ones long enough to get lost in, so their
-+   whole header travels with the reader: title, search and filters stay one click away
-+   instead of being a scroll back to the top. */
++/* The A-Z listings and views that opt in keep their whole header with the reader, so
++   title, search and filters stay one click away instead of requiring a scroll to top. */
 +.listing-header--pinned {
 +  position: sticky;
 +  top: 0;
