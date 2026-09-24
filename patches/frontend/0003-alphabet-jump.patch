@@ -1,7 +1,7 @@
 From 9282c0614f6f36ded97b25dc38d22aed48522532 Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
 Date: Wed, 23 Sep 2026 20:56:31 +0000
-Subject: [PATCH] Put an A-Z strip above every library listing
+Subject: [PATCH 1/2] Put an A-Z strip above every library listing
 
 Scrolling is the only way through a library listing today: it pages 50 at a time,
 so the far end of the alphabet is dozens of loads away, and the search box matches
@@ -806,6 +806,217 @@ index c688af3..83e2998 100644
    if (!params.favoritesOnly && !params.provider) {
      total.value = store.libraryTracksCount;
      return;
+-- 
+2.43.0
+
+
+From f09a98abc6cf6a4a1bde9d30b85e9770cf0cf4e5 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 24 Sep 2026 05:33:32 +0000
+Subject: [PATCH 2/2] Follow the scroll with the A-Z strip
+
+The strip marked where the listing began, which stopped being the answer as soon as
+you scrolled: browsing from K into L left K lit.
+
+Every rendered item now carries the bucket it is filed under, and a scroll handler
+asks the document what is sitting just under the strip. One hit test per frame,
+and it does not care that list view recycles its rows while panel view does not -
+it reads what is actually on screen rather than what the listing believes it drew.
+
+Which bucket an item belongs to is worked out in the frontend rather than asked
+for, because it is only used to light up a letter. bucketOf folds accents with NFD,
+which covers the names that actually occur; the transliterations the server also
+does (AE for the ligature, R for the Cyrillic one) are rare enough that a briefly
+wrong highlight costs nothing, and they are wrong only in the highlight, never in
+where a jump lands.
+
+Picking a letter still marks it immediately - the reading is cleared on a jump, so
+the strip follows the click until the next scroll has something to say.
+
+bucketOf is unit-tested. The probe around it is not: jsdom has no layout, so
+elementFromPoint returns nothing there, and the listing's harness does not render
+the scroller the items live in.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01VpS6zTXcRdworxLZ6Dp1De
+---
+ src/components/ItemsListing.vue | 76 ++++++++++++++++++++++++++++++---
+ src/helpers/alphabet_jump.ts    | 29 +++++++++++++
+ 2 files changed, 100 insertions(+), 5 deletions(-)
+
+diff --git a/src/components/ItemsListing.vue b/src/components/ItemsListing.vue
+index f512953..5d78ff0 100644
+--- a/src/components/ItemsListing.vue
++++ b/src/components/ItemsListing.vue
+@@ -141,6 +141,9 @@
+             v-for="item in pagedItems"
+             :key="item.uri"
+             cols="12"
++            :data-jump-letter="
++              alphabetJumpAvailable ? bucketOf(item, params.sortBy) : undefined
++            "
+             :class="`col-${panelViewItemResponsive($vuetify.display.width)}`"
+           >
+             <PanelviewItem
+@@ -173,6 +176,9 @@
+             v-for="item in pagedItems"
+             :key="item.uri"
+             cols="12"
++            :data-jump-letter="
++              alphabetJumpAvailable ? bucketOf(item, params.sortBy) : undefined
++            "
+             :class="`col-${panelViewItemResponsive($vuetify.display.width)}`"
+           >
+             <PanelviewItemCompact
+@@ -203,6 +209,11 @@
+             </div>
+             <ListviewItem
+               v-else
++              :data-jump-letter="
++                alphabetJumpAvailable
++                  ? bucketOf(item, params.sortBy)
++                  : undefined
++              "
+               :item="item"
+               :album-track-view="itemtype === 'albumtracks'"
+               :show-track-number="showTrackNumber"
+@@ -297,7 +308,12 @@
+ import type { Component } from "vue";
+ 
+ import AlphabetJumpBar from "@/components/AlphabetJumpBar.vue";
+-import { earlierPageParams, NAME_SORT_KEYS } from "@/helpers/alphabet_jump";
++import {
++  bucketOf,
++  earlierPageParams,
++  NAME_SORT_KEYS,
++  TOP_BUCKET,
++} from "@/helpers/alphabet_jump";
+ import Container from "@/components/Container.vue";
+ import GenreIcon from "@/components/icons/GenreIcon.vue";
+ import ListViewSkeleton from "@/components/skeletons/ListViewSkeleton.vue";
+@@ -965,16 +981,58 @@ const alphabetJumpAvailable = computed(
+   () => props.showAlphabetJump && NAME_SORT_KEYS.includes(params.value.sortBy),
+ );
+ 
+-// The letter the strip marks. The listing runs from here to the end of the library, so
+-// this is where it begins rather than where the scroll happens to be; "#" is the top.
+-const activeJumpLetter = computed(() =>
+-  params.value.startsFrom ? params.value.startsFrom.toUpperCase() : "#",
++// The bucket of whatever item is currently under the strip, once the listing has been
++// scrolled. Until then there is nothing to read, and the strip marks where the listing
++// begins instead.
++const scrolledToLetter = ref<string>();
++
++const activeJumpLetter = computed(
++  () =>
++    scrolledToLetter.value ??
++    (params.value.startsFrom
++      ? params.value.startsFrom.toUpperCase()
++      : TOP_BUCKET),
+ );
+ 
++/**
++ * Read the bucket of the item sitting just under the strip.
++ *
++ * Asking the document what is at a point beats tracking the items themselves: it costs one
++ * hit test, it does not care that list view recycles its rows while panel view does not,
++ * and it reads what is actually on screen rather than what the listing believes it drew.
++ */
++const readLetterUnderStrip = function () {
++  const strip = jumpBarRef.value?.$el as HTMLElement | undefined;
++  if (!strip) return;
++  const bounds = strip.getBoundingClientRect();
++  const probed = document.elementFromPoint(
++    bounds.left + bounds.width / 2,
++    bounds.bottom + 4,
++  );
++  const letter = probed
++    ?.closest("[data-jump-letter]")
++    ?.getAttribute("data-jump-letter");
++  // nothing under the strip just now (a gap, or a page still loading): keep the last
++  // reading rather than flicking back to wherever the listing started
++  if (letter) scrolledToLetter.value = letter;
++};
++
++let letterProbeQueued = false;
++const onScrollProbeLetter = function () {
++  if (letterProbeQueued) return;
++  letterProbeQueued = true;
++  requestAnimationFrame(() => {
++    letterProbeQueued = false;
++    readLetterUnderStrip();
++  });
++};
++
+ const jumpToLetter = function (letter: string | undefined) {
+   params.value.startsFrom = letter;
+   earlierOffset.value = 0;
+   earliestReached.value = false;
++  // the letter just picked marks the strip until the next scroll says otherwise
++  scrolledToLetter.value = undefined;
+   loadData(undefined, undefined, true);
+ };
+ 
+@@ -2038,8 +2096,16 @@ const clearSelection = () => {
+ // working for is already gone.
+ let unmounted = false;
+ 
++// capture, so a listing that scrolls inside a container is followed as well as one that
++// scrolls the page
++window.addEventListener("scroll", onScrollProbeLetter, {
++  passive: true,
++  capture: true,
++});
++
+ onBeforeUnmount(() => {
+   unmounted = true;
++  window.removeEventListener("scroll", onScrollProbeLetter, { capture: true });
+   eventbus.off("clearSelection", clearSelection);
+   _unsubscribeMediaEvents?.();
+ });
+diff --git a/src/helpers/alphabet_jump.ts b/src/helpers/alphabet_jump.ts
+index 447e4bb..77da13b 100644
+--- a/src/helpers/alphabet_jump.ts
++++ b/src/helpers/alphabet_jump.ts
+@@ -1,5 +1,8 @@
+ /** Helpers for the A-Z strip that jumps a long library listing to a letter. */
+ 
++/** The strip's leading bucket: the top of the listing, where the unlettered names sort. */
++export const TOP_BUCKET = "#";
++
+ /** The sort keys a first letter means anything under; any other order scatters them. */
+ export const NAME_SORT_KEYS = [
+   "name",
+@@ -46,3 +49,29 @@ export function earlierPageParams<
+     offset: earlierOffset,
+   };
+ }
++
++/**
++ * Return the strip bucket an item is filed under.
++ *
++ * Only used to light up the strip as the listing scrolls, so it mirrors the server's
++ * normalisation rather than reproducing it: NFD folds the accents that actually occur in
++ * names, while the transliterations the server also does (AE for the ligature, R for the
++ * Cyrillic one) are rare enough that a briefly wrong highlight costs nothing.
++ *
++ * :param item: The media item to file.
++ * :param sortBy: The sort key the listing is using, which decides which name is read.
++ */
++export function bucketOf(
++  item: { name?: string; sort_name?: string },
++  sortBy: string,
++): string {
++  const usesPlainName = sortBy === "name" || sortBy === "name_desc";
++  const source = usesPlainName ? item.name : (item.sort_name ?? item.name);
++  const normalised = (source ?? "")
++    .normalize("NFD")
++    .replace(/\p{Diacritic}/gu, "")
++    .toLowerCase()
++    .replace(/[^a-z0-9]/g, "");
++  const first = normalised.charAt(0);
++  return first >= "a" && first <= "z" ? first.toUpperCase() : TOP_BUCKET;
++}
 -- 
 2.43.0
 
