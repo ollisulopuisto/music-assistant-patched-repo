@@ -1041,14 +1041,14 @@ instead.
 Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01VpS6zTXcRdworxLZ6Dp1De
 ---
- src/components/ItemsListing.vue | 213 +++++++++++++++++++-------------
- 1 file changed, 130 insertions(+), 83 deletions(-)
+ src/components/ItemsListing.vue | 53 +++++++++++++++++++++++++++++++-----
+ 1 file changed, 50 insertions(+), 3 deletions(-)
 
 diff --git a/src/components/ItemsListing.vue b/src/components/ItemsListing.vue
 index 5d78ff0..3372403 100644
 --- a/src/components/ItemsListing.vue
 +++ b/src/components/ItemsListing.vue
-@@ -1,95 +1,103 @@
+@@ -1,4 +1,11 @@
  <!-- eslint-disable vue/no-v-for-template-key-on-child -->
  <template>
 -  <section v-if="!(hideOnEmpty && pagedItems.length == 0 && !hasActiveFilters)">
@@ -1056,183 +1056,14 @@ index 5d78ff0..3372403 100644
 +    v-if="!(hideOnEmpty && pagedItems.length == 0 && !hasActiveFilters)"
 +    ref="listingRef"
 +  >
-     <!-- eslint-disable vue/no-template-shadow -->
--    <Toolbar
--      :icon="icon"
--      :icon-action="iconAction"
--      :title="title"
--      :subtitle="subtitle"
--      :count="params.search ? pagedItems.length : total || allItems.length"
--      color="transparent"
--      :menu-items="menuItems"
--      :enforce-overflow-menu="true"
--      :menu-active="hasActiveFilters"
--      @title-clicked="toggleExpand"
 +    <div
 +      class="listing-header"
 +      :class="{ 'listing-header--pinned': alphabetJumpAvailable && expanded }"
-     >
--      <template #title>
--        <slot name="title">{{ title }}</slot>
--      </template>
-+      <Toolbar
-+        :icon="icon"
-+        :icon-action="iconAction"
-+        :title="title"
-+        :subtitle="subtitle"
-+        :count="params.search ? pagedItems.length : total || allItems.length"
-+        color="transparent"
-+        :menu-items="menuItems"
-+        :enforce-overflow-menu="true"
-+        :menu-active="hasActiveFilters"
-+        @title-clicked="toggleExpand"
-+      >
-+        <template #title>
-+          <slot name="title">{{ title }}</slot>
-+        </template>
- 
--      <template v-if="!store.mobileLayout" #append>
--        <Transition name="listing-search">
--          <div v-if="showSearchInput" class="listing-search-slot">
--            <SearchInput
--              ref="searchInputRef"
--              v-model="params.search"
--              clearable
--              class="listing-search listing-search--inline w-(--listing-search-width) shrink-0"
--              :placeholder="searchLabel"
--              :aria-label="searchLabel"
--              @focus="searchHasFocus = true"
--              @blur="searchHasFocus = false"
--            />
--          </div>
--        </Transition>
--      </template>
--    </Toolbar>
-+        <template v-if="!store.mobileLayout" #append>
-+          <Transition name="listing-search">
-+            <div v-if="showSearchInput" class="listing-search-slot">
-+              <SearchInput
-+                ref="searchInputRef"
-+                v-model="params.search"
-+                clearable
-+                class="listing-search listing-search--inline w-(--listing-search-width) shrink-0"
-+                :placeholder="searchLabel"
-+                :aria-label="searchLabel"
-+                @focus="searchHasFocus = true"
-+                @blur="searchHasFocus = false"
-+              />
-+            </div>
-+          </Transition>
-+        </template>
-+      </Toolbar>
- 
--    <v-divider />
-+      <v-divider />
- 
--    <div v-if="props.toolBarTabs !== undefined" class="content-tabs">
--      <Tabs
--        :model-value="activeTabId"
--        class="items-start"
--        @update:model-value="(v) => onTabChange(v as string)"
-+      <div v-if="props.toolBarTabs !== undefined" class="content-tabs">
-+        <Tabs
-+          :model-value="activeTabId"
-+          class="items-start"
-+          @update:model-value="(v) => onTabChange(v as string)"
-+        >
-+          <TabsList variant="line">
-+            <TabsTrigger
-+              v-for="tab in props.toolBarTabs"
-+              :key="tab.id"
-+              :value="tab.id"
-+            >
-+              {{ tab.label }}
-+            </TabsTrigger>
-+          </TabsList>
-+        </Tabs>
-+      </div>
-+
-+      <div
-+        v-if="showSearchInput && store.mobileLayout"
-+        class="mx-2.5 mt-2.5 flex items-center gap-1"
-       >
--        <TabsList variant="line">
--          <TabsTrigger
--            v-for="tab in props.toolBarTabs"
--            :key="tab.id"
--            :value="tab.id"
--          >
--            {{ tab.label }}
--          </TabsTrigger>
--        </TabsList>
--      </Tabs>
--    </div>
--
--    <div
--      v-if="showSearchInput && store.mobileLayout"
--      class="mx-2.5 mt-2.5 flex items-center gap-1"
--    >
--      <SearchInput
--        ref="searchInputRef"
--        v-model="params.search"
--        clearable
--        class="listing-search listing-search--row min-w-0 flex-1"
--        :placeholder="searchLabel"
--        :aria-label="searchLabel"
--        @focus="searchHasFocus = true"
--        @blur="searchHasFocus = false"
-+        <SearchInput
-+          ref="searchInputRef"
-+          v-model="params.search"
-+          clearable
-+          class="listing-search listing-search--row min-w-0 flex-1"
-+          :placeholder="searchLabel"
-+          :aria-label="searchLabel"
-+          @focus="searchHasFocus = true"
-+          @blur="searchHasFocus = false"
-+        />
-+        <Button
-+          variant="ghost"
-+          size="icon"
-+          class="size-10 shrink-0"
-+          :aria-label="$t('close')"
-+          :title="$t('close')"
-+          @click="closeSearch"
-+        >
-+          <X class="size-[22px]" />
-+        </Button>
-+      </div>
-+
-+      <AlphabetJumpBar
-+        v-if="alphabetJumpAvailable && expanded"
-+        ref="jumpBarRef"
-+        :active="activeJumpLetter"
-+        :disabled="loading"
-+        @jump="jumpToLetter"
-       />
--      <Button
--        variant="ghost"
--        size="icon"
--        class="size-10 shrink-0"
--        :aria-label="$t('close')"
--        :title="$t('close')"
--        @click="closeSearch"
--      >
--        <X class="size-[22px]" />
--      </Button>
-     </div>
- 
--    <AlphabetJumpBar
--      v-if="alphabetJumpAvailable && expanded"
--      ref="jumpBarRef"
--      :active="activeJumpLetter"
--      :disabled="loading"
--      @jump="jumpToLetter"
--    />
--
++    >
+     <!-- eslint-disable vue/no-template-shadow -->
+@@ -94,1 +101,2 @@
++    </div>
      <Container
-       v-if="expanded"
-       :variant="viewMode == 'list' ? 'default' : 'panel'"
 @@ -597,6 +605,7 @@ const showSearch = ref(false);
  const searchHasFocus = ref(false);
  const searchInputRef = ref<InstanceType<typeof SearchInput>>();
