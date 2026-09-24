@@ -1082,10 +1082,10 @@ index 5d78ff0..3372403 100644
 @@ -94,1 +101,2 @@
 +    </div>
      <Container
-@@ -127,1 +127,1 @@
+@@ -127,1 +137,1 @@
 -          v-if="viewMode == 'list'"
 +          v-if="viewMode == 'list' && !params.startsFrom"
-@@ -153,1 +153,28 @@
+@@ -153,1 +164,28 @@
          </v-virtual-scroll>
 +        <!-- Keep jumped list rows in the document flow so the start sentinel can
 +             observe them and prepending a page has a measurable scroll height. -->
