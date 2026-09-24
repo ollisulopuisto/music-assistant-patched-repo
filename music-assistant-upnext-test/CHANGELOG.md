@@ -5,6 +5,63 @@ Music Assistant, rebuilt from upstream's own release with the patches in
 applied. Each entry names the upstream release it carries and the patches on top
 of it.
 
+## 2.10.4-upnext.6
+
+Built from [Music Assistant 2.10.4](https://github.com/music-assistant/server/releases/tag/2.10.4), with these patches applied:
+
+- **server** — Surface the Pocket Casts Up Next queue as a podcast
+- **server** — Stop re-asking Pocket Casts for the same account-wide status
+- **server** — Give the browse folders their episodes' show notes
+- **server** — Let a library listing start at a first letter
+- **server** — Install the patched frontend wheel over the pinned one
+- **server** — Look for a user-supplied app_vars.json in the add-on data directory
+- **frontend** — Refuse to render form controls from metadata markdown
+- **frontend** — Show a podcast episode's show notes where lyrics go
+- **frontend** — Put an A-Z strip above every library listing
+
+### Upstream release notes for 2.10.4
+
+#### 📦 Stable Release
+
+_Changes since [2.10.3](https://github.com/music-assistant/server/releases/tag/2.10.3)_
+
+##### 🚀 Features and enhancements
+
+- Let the sample rates setting apply to Sonos players (by @RyanAtTanagra in #6356)
+
+##### 🐛 Bugfixes
+
+- Keep provider item lookups scoped to their own media type (by @jdaberkow in #6203)
+- Keep the duplicate track walk from freezing the library database (by @OzGav in #6236)
+- Stop a hostname in the Published IP address setting from breaking playback (by @marcelveldt in #6305)
+- Fill in unplayable album tracks from another provider (by @OzGav in #6310)
+- Fix Squeezelite players sometimes playing static instead of music (by @marcelveldt in #6311)
+- Fix Squeezelite players going silent when switching tracks quickly (by @marcelveldt in #6316)
+- Keep retrying YouTube Music when the PO Token server is not up yet (by @CodeCommander in #6326)
+- Log an unavailable player at debug level while polling (by @balloob in #6336)
+- Let users control their own connected client player (by @MarvinSchenkel in #6340)
+- Show Qobuz tracks played outside the library in Recently played (by @chrisuthe in #6347)
+- Drop provider mappings for items the provider no longer has (by @RyanAtTanagra in #6355)
+- Fix library artists and albums picking up an invalid provider link (by @marcelveldt in #6362)
+- Ensure that the in-library view doesn't "lose" media items during a socket update in Audiobookshelf (by @fmunkes in #6363)
+- Return HTTP 400 instead of 500 for a non-JSON login request body (by @MarvinSchenkel in #6371)
+- Treat YouTube Music as a realtime source (by @MarvinSchenkel in #6373)
+
+##### Other Changes
+
+- Fix library artists and albums picking up an invalid provider link (by @marcelveldt in #6366)
+
+##### 🧰 Maintenance and dependency bumps
+
+- Fix memory build-up when a crossfade gets interrupted (by @marcelveldt in #6341)
+- Clarify that manual button presses are needed for Spotify setup flow (by @remon1496 in #6383)
+
+#### :bow: Thanks to our contributors
+
+Special thanks to the following contributors who helped with this release:
+
+@CodeCommander, @MarvinSchenkel, @OzGav, @RyanAtTanagra, @balloob, @chrisuthe, @fmunkes, @jdaberkow, @marcelveldt, @remon1496
+
 ## 2.10.4-upnext.5
 
 Built from [Music Assistant 2.10.4](https://github.com/music-assistant/server/releases/tag/2.10.4), with these patches applied:
