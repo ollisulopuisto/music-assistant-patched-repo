@@ -625,7 +625,7 @@ index b60ddfc..9b1936d 100644
      :load-paged-data="loadItems"
      :show-library="true"
      :sort-keys="sortKeys"
-+    :pin-listing-header="true"
++    :show-alphabet-jump="true"
      :update-available="updateAvailable"
      :title="$t('audiobooks')"
      :allow-key-hooks="true"
@@ -1082,7 +1082,39 @@ index 5d78ff0..3372403 100644
 @@ -94,1 +101,2 @@
 +    </div>
      <Container
-@@ -597,6 +605,7 @@ const showSearch = ref(false);
+@@ -127,1 +127,1 @@
+-          v-if="viewMode == 'list'"
++          v-if="viewMode == 'list' && !params.startsFrom"
+@@ -153,1 +153,28 @@
+         </v-virtual-scroll>
++        <!-- Keep jumped list rows in the document flow so the start sentinel can
++             observe them and prepending a page has a measurable scroll height. -->
++        <div v-else-if="viewMode == 'list'">
++          <ListviewItem
++            v-for="item in pagedItems"
++            :key="item.uri"
++            :data-jump-letter="
++              alphabetJumpAvailable ? bucketOf(item, params.sortBy) : undefined
++            "
++            :item="item"
++            :show-track-number="showTrackNumber"
++            :show-disc-number="showTrackNumber"
++            :show-duration="showDuration"
++            :show-favorite="showFavoritesOnlyFilter"
++            :show-menu="item.is_playable"
++            :show-provider="showProvider"
++            :show-album="showAlbum"
++            :show-checkboxes="showCheckboxes"
++            :is-selected="isSelected(item)"
++            :is-available="itemIsAvailable(item)"
++            :is-playing="isPlaying(item, itemtype)"
++            :show-details="itemtype.includes('versions')"
++            :disable-play-button="isPlayActionInProgress"
++            :parent-item="parentItem"
++            @select="onSelect"
++          />
++        </div>
+@@ -597,6 +628,7 @@ const showSearch = ref(false);
  const searchHasFocus = ref(false);
  const searchInputRef = ref<InstanceType<typeof SearchInput>>();
  const jumpBarRef = ref<InstanceType<typeof AlphabetJumpBar>>();
