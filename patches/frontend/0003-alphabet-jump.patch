@@ -1,4 +1,4 @@
-From af0ad7caada712883dd30f7a5e375b95523a7b0a Mon Sep 17 00:00:00 2001
+From 9282c0614f6f36ded97b25dc38d22aed48522532 Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
 Date: Wed, 23 Sep 2026 20:56:31 +0000
 Subject: [PATCH] Put an A-Z strip above every library listing
@@ -7,41 +7,53 @@ Scrolling is the only way through a library listing today: it pages 50 at a time
 so the far end of the alphabet is dozens of loads away, and the search box matches
 anywhere in a name so it cannot stand in for one.
 
-Every library view gains a strip under its toolbar - the whole alphabet visible at
-once, led by '#' for the top of the listing, where the names that start with a
-digit and the ones that reduce to nothing already sort. Picking a letter asks the
-server to start the listing there; the letters after it are still below, so
-scrolling carries on into them rather than stopping at the end of a bucket.
+Every library view gains a strip pinned under its toolbar - the whole alphabet
+visible at once, led by '#' for the top of the listing, where the names that start
+with a digit and the ones that reduce to nothing already sort. Picking a letter
+asks the server to start the listing there.
 
-The strip marks where the listing begins. It does not yet follow the scroll: list
-view is virtualised and panel view is not, so tracking the topmost visible item
-needs two different mechanisms, and that is worth its own change rather than a
-fragile one bolted on here.
+Scrolling then works in both directions. Down needs nothing new: the letters after
+the jump are still in the listing. Up asks for the mirror - the items before the
+letter, with the ordering reversed so the nearest come first - and prepends each
+page. Vuetify compensates the scroll position itself when a listing prepends, but
+only while it is the scrolling element, and here the page scrolls instead, so this
+holds the reader in place by hand.
+
+The strip only appears while the listing is in name order. Sorted by date added or
+play count, a letter would scatter matching items through the listing rather than
+starting it somewhere, which is not what the strip promises.
+
+What to ask the server for when walking up is a decision rather than wiring, so it
+lives in helpers/alphabet_jump.ts where it is unit-tested. The wiring that calls it
+is not: the listing's test harness does not render Vuetify's infinite scroller, so
+a test reaching for it would assert nothing.
 
 Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01VpS6zTXcRdworxLZ6Dp1De
 ---
- src/components/AlphabetJumpBar.vue | 89 ++++++++++++++++++++++++++++++
- src/components/ItemsListing.vue    | 25 +++++++++
- src/plugins/api/index.ts           | 15 +++++
- src/translations/en.json           |  1 +
- src/views/LibraryAlbums.vue        |  9 +++
- src/views/LibraryArtists.vue       |  9 +++
- src/views/LibraryAudiobooks.vue    | 10 ++++
- src/views/LibraryGenres.vue        |  2 +
- src/views/LibraryPlaylists.vue     |  9 +++
- src/views/LibraryPodcasts.vue      |  9 +++
- src/views/LibraryRadios.vue        |  9 +++
- src/views/LibraryTracks.vue        |  9 +++
- 12 files changed, 196 insertions(+)
+ src/components/AlphabetJumpBar.vue |  95 ++++++++++++++++++++++++++
+ src/components/ItemsListing.vue    | 104 ++++++++++++++++++++++++++++-
+ src/helpers/alphabet_jump.ts       |  48 +++++++++++++
+ src/plugins/api/index.ts           |  30 +++++++++
+ src/translations/en.json           |   1 +
+ src/views/LibraryAlbums.vue        |  10 +++
+ src/views/LibraryArtists.vue       |  10 +++
+ src/views/LibraryAudiobooks.vue    |  12 ++++
+ src/views/LibraryGenres.vue        |   3 +
+ src/views/LibraryPlaylists.vue     |  10 +++
+ src/views/LibraryPodcasts.vue      |  10 +++
+ src/views/LibraryRadios.vue        |  10 +++
+ src/views/LibraryTracks.vue        |  10 +++
+ 13 files changed, 352 insertions(+), 1 deletion(-)
  create mode 100644 src/components/AlphabetJumpBar.vue
+ create mode 100644 src/helpers/alphabet_jump.ts
 
 diff --git a/src/components/AlphabetJumpBar.vue b/src/components/AlphabetJumpBar.vue
 new file mode 100644
-index 0000000..2003064
+index 0000000..ac5ff7f
 --- /dev/null
 +++ b/src/components/AlphabetJumpBar.vue
-@@ -0,0 +1,89 @@
+@@ -0,0 +1,95 @@
 +<template>
 +  <div
 +    class="alphabet-jump-bar"
@@ -89,6 +101,12 @@ index 0000000..2003064
 +
 +<style scoped>
 +.alphabet-jump-bar {
++  /* pinned, so the alphabet stays reachable once the listing is scrolled past it */
++  position: sticky;
++  top: 0;
++  z-index: 2;
++  background-color: rgb(var(--v-theme-surface));
++  border-bottom: 1px solid rgba(var(--v-border-color), var(--v-border-opacity));
 +  display: flex;
 +  align-items: center;
 +  gap: 1px;
@@ -132,15 +150,16 @@ index 0000000..2003064
 +}
 +</style>
 diff --git a/src/components/ItemsListing.vue b/src/components/ItemsListing.vue
-index 0786838..22e0823 100644
+index 0786838..f512953 100644
 --- a/src/components/ItemsListing.vue
 +++ b/src/components/ItemsListing.vue
-@@ -82,6 +82,13 @@
+@@ -82,6 +82,14 @@
        </Button>
      </div>
  
 +    <AlphabetJumpBar
-+      v-if="showAlphabetJump && expanded"
++      v-if="alphabetJumpAvailable && expanded"
++      ref="jumpBarRef"
 +      :active="activeJumpLetter"
 +      :disabled="loading"
 +      @jump="jumpToLetter"
@@ -149,24 +168,35 @@ index 0786838..22e0823 100644
      <Container
        v-if="expanded"
        :variant="viewMode == 'list' ? 'default' : 'panel'"
-@@ -287,6 +294,7 @@
+@@ -121,6 +129,7 @@
+           !(loading && pagedItems.length === 0)
+         "
+         :onLoad="loadNextPage"
++        :side="params.startsFrom ? 'both' : 'end'"
+         :mode="infiniteScroll ? 'intersect' : 'manual'"
+         :load-more-text="$t('load_more_items')"
+         :empty-text="''"
+@@ -287,6 +296,8 @@
  <script setup lang="ts">
  import type { Component } from "vue";
  
 +import AlphabetJumpBar from "@/components/AlphabetJumpBar.vue";
++import { earlierPageParams, NAME_SORT_KEYS } from "@/helpers/alphabet_jump";
  import Container from "@/components/Container.vue";
  import GenreIcon from "@/components/icons/GenreIcon.vue";
  import ListViewSkeleton from "@/components/skeletons/ListViewSkeleton.vue";
-@@ -381,6 +389,8 @@ export interface LoadDataParams {
+@@ -381,6 +392,10 @@ export interface LoadDataParams {
    sortBy: string;
    search: string;
    genreIds?: number | number[];
 +  // the letter the listing starts at; everything after it is still in the listing
 +  startsFrom?: string;
++  // its mirror, used with a reversed sortBy to fetch the items above a jump
++  startsBefore?: string;
    favoritesOnly?: boolean;
    albumArtistsFilter?: boolean;
    libraryOnly?: boolean;
-@@ -433,6 +443,7 @@ export interface Props {
+@@ -433,6 +448,7 @@ export interface Props {
    emptyMessage?: string;
    showLibraryOnlyFilter?: boolean;
    showGenreFilter?: boolean;
@@ -174,7 +204,7 @@ index 0786838..22e0823 100644
    showHideEmptyFilter?: boolean;
    showHideFullyPlayedFilter?: boolean;
    allowCollapse?: boolean;
-@@ -486,6 +497,7 @@ const props = withDefaults(defineProps<Props>(), {
+@@ -486,6 +502,7 @@ const props = withDefaults(defineProps<Props>(), {
    subtitle: undefined,
    showLibraryOnlyFilter: false,
    showGenreFilter: false,
@@ -182,18 +212,32 @@ index 0786838..22e0823 100644
    showHideEmptyFilter: false,
    showHideFullyPlayedFilter: false,
    extraMenuItems: undefined,
-@@ -556,6 +568,7 @@ const params = ref<LoadDataParams>({
+@@ -556,11 +573,14 @@ const params = ref<LoadDataParams>({
    search: "",
    libraryOnly: false,
    genreIds: undefined,
 +  startsFrom: undefined,
++  startsBefore: undefined,
  });
  const viewMode = ref("list");
  const showSearch = ref(false);
-@@ -938,6 +951,17 @@ const changeSort = function (sort_key?: string) {
+ const searchHasFocus = ref(false);
+ const searchInputRef = ref<InstanceType<typeof SearchInput>>();
++const jumpBarRef = ref<InstanceType<typeof AlphabetJumpBar>>();
+ const listingMediaType = computed(() => MEDIA_TYPE_BY_ITEMTYPE[props.itemtype]);
+ const searchLabel = computed(() => {
+   const mediaType = listingMediaType.value;
+@@ -938,6 +958,26 @@ const changeSort = function (sort_key?: string) {
    loadData(undefined, undefined, true);
  };
  
++// A letter is only meaningful while the listing is in name order: sorted by date added
++// or play count, "from K onwards" would scatter matching items through the listing rather
++// than starting it somewhere. The strip stays out of the way for those sorts.
++const alphabetJumpAvailable = computed(
++  () => props.showAlphabetJump && NAME_SORT_KEYS.includes(params.value.sortBy),
++);
++
 +// The letter the strip marks. The listing runs from here to the end of the library, so
 +// this is where it begins rather than where the scroll happens to be; "#" is the top.
 +const activeJumpLetter = computed(() =>
@@ -202,13 +246,97 @@ index 0786838..22e0823 100644
 +
 +const jumpToLetter = function (letter: string | undefined) {
 +  params.value.startsFrom = letter;
++  earlierOffset.value = 0;
++  earliestReached.value = false;
 +  loadData(undefined, undefined, true);
 +};
 +
  const changeAlbumTypeFilter = function (albumType: string) {
    if (params.value.albumType?.includes(albumType))
      params.value.albumType = params.value.albumType?.filter(
-@@ -1068,6 +1092,7 @@ const hasActiveFilters = computed(() => {
+@@ -1010,11 +1050,72 @@ const redirectSearch = function () {
+   });
+ };
+ 
++// How far back up out of a jump the listing has already walked, and whether it has
++// reached the top. Counted separately from params.offset, which only ever runs forward.
++const earlierOffset = ref(0);
++const earliestReached = ref(false);
++
++/**
++ * Load the page of items immediately before the ones on screen and put it above them.
++ *
++ * A jump asks the server for "this letter onwards", so there is nothing above the first
++ * item to page into. Asking for "before this letter" with the ordering reversed gives the
++ * items that precede it, nearest first; reversed back, that is the run to prepend.
++ */
++const loadEarlierPage = async function (): Promise<boolean> {
++  const loadPagedData = props.loadPagedData;
++  const startsFrom = params.value.startsFrom;
++  if (!loadPagedData || !startsFrom || earliestReached.value) return false;
++
++  const earlier = await loadPagedData(
++    earlierPageParams(
++      { ...params.value, limit: props.limit },
++      earlierOffset.value,
++    ),
++  );
++
++  if (earlier.length < props.limit) earliestReached.value = true;
++  if (!earlier.length) return false;
++  earlierOffset.value += earlier.length;
++
++  // the page arrived nearest-first because the ordering was reversed to fetch it
++  const scroller = scrollParent();
++  const before = scroller ? scroller.scrollHeight : 0;
++  pagedItems.value.unshift(...earlier.reverse());
++  // the listing grew above the viewport, so hold the reader where they were. Vuetify does
++  // this itself, but only when it is the scrolling element - here the page scrolls instead
++  await nextTick();
++  if (scroller) scroller.scrollTop += scroller.scrollHeight - before;
++  return true;
++};
++
++/** Return the element that actually scrolls this listing, if there is one. */
++const scrollParent = function (): HTMLElement | null {
++  let el: HTMLElement | null = jumpBarRef.value?.$el?.parentElement ?? null;
++  while (el) {
++    const overflow = getComputedStyle(el).overflowY;
++    if (
++      (overflow === "auto" || overflow === "scroll") &&
++      el.scrollHeight > el.clientHeight
++    ) {
++      return el;
++    }
++    el = el.parentElement;
++  }
++  return document.scrollingElement as HTMLElement | null;
++};
++
+ const loadNextPage = async function ({
++  side,
+   done,
+ }: {
++  side: "start" | "end" | "both";
+   done: (status: "ok" | "empty" | "loading" | "error") => void;
+ }) {
++  if (side === "start") {
++    done((await loadEarlierPage()) ? "ok" : "empty");
++    return;
++  }
+   if (allItemsReceived.value) {
+     done("empty");
+     return;
+@@ -1035,7 +1136,7 @@ const loadAllItems = async function () {
+     // the paging can outlast the listing, so stop fetching once it is gone
+     if (unmounted) return;
+ 
+-    await loadNextPage({ done: function () {} });
++    await loadNextPage({ side: "end", done: function () {} });
+   }
+ };
+ 
+@@ -1068,6 +1169,7 @@ const hasActiveFilters = computed(() => {
      (!props.requireProviderSelection && p.provider && p.provider.length > 0) ||
      (p.albumType && p.albumType.length > 0) ||
      genreActive ||
@@ -216,127 +344,196 @@ index 0786838..22e0823 100644
      // hide-empty genres filter: true (hide empty) and null (defaults only)
      // both narrow the result; false/undefined means "show all"
      p.hideEmptyFilter === true ||
+diff --git a/src/helpers/alphabet_jump.ts b/src/helpers/alphabet_jump.ts
+new file mode 100644
+index 0000000..447e4bb
+--- /dev/null
++++ b/src/helpers/alphabet_jump.ts
+@@ -0,0 +1,48 @@
++/** Helpers for the A-Z strip that jumps a long library listing to a letter. */
++
++/** The sort keys a first letter means anything under; any other order scatters them. */
++export const NAME_SORT_KEYS = [
++  "name",
++  "name_desc",
++  "sort_name",
++  "sort_name_desc",
++];
++
++/**
++ * Return the same sort key in the opposite direction.
++ *
++ * :param sortBy: The sort key the listing is using.
++ */
++export function reverseSortKey(sortBy: string): string {
++  return sortBy.endsWith("_desc")
++    ? sortBy.slice(0, -"_desc".length)
++    : `${sortBy}_desc`;
++}
++
++/**
++ * Return the listing arguments that fetch the page above a jump.
++ *
++ * A jump asks for "this letter onwards", so there is nothing above the first item to page
++ * into. Asking for "before this letter" with the ordering reversed walks backwards from
++ * it instead, a page at a time, nearest first.
++ *
++ * :param params: The listing's current arguments, including the letter it jumped to.
++ * :param earlierOffset: How many items above the jump have already been fetched.
++ */
++export function earlierPageParams<
++  T extends {
++    sortBy: string;
++    startsFrom?: string;
++    startsBefore?: string;
++    offset: number;
++    limit: number;
++  },
++>(params: T, earlierOffset: number): T {
++  return {
++    ...params,
++    startsFrom: undefined,
++    startsBefore: params.startsFrom,
++    sortBy: reverseSortKey(params.sortBy),
++    offset: earlierOffset,
++  };
++}
 diff --git a/src/plugins/api/index.ts b/src/plugins/api/index.ts
-index 16edcc5..43f931f 100644
+index 16edcc5..d1a7900 100644
 --- a/src/plugins/api/index.ts
 +++ b/src/plugins/api/index.ts
-@@ -512,6 +512,7 @@ export class MusicAssistantApi {
+@@ -512,6 +512,8 @@ export class MusicAssistantApi {
      order_by?: string,
      provider?: string | string[],
      genre?: number | number[],
 +    starts_from?: string,
++    starts_before?: string,
    ): Promise<Track[]> {
      return this.sendCommand("music/tracks/library_items", {
        favorite,
-@@ -521,6 +522,7 @@ export class MusicAssistantApi {
+@@ -521,6 +523,8 @@ export class MusicAssistantApi {
        order_by,
        provider,
        genre,
 +      starts_from,
++      starts_before,
      });
    }
  
-@@ -661,6 +663,7 @@ export class MusicAssistantApi {
+@@ -661,6 +665,8 @@ export class MusicAssistantApi {
      provider?: string | string[],
      genre?: number | number[],
      artist_type?: ArtistType,
 +    starts_from?: string,
++    starts_before?: string,
    ): Promise<Artist[]> {
      return this.sendCommand("music/artists/library_items", {
        favorite,
-@@ -672,6 +675,7 @@ export class MusicAssistantApi {
+@@ -672,6 +678,8 @@ export class MusicAssistantApi {
        provider,
        genre,
        artist_type,
 +      starts_from,
++      starts_before,
      });
    }
  
-@@ -787,6 +791,7 @@ export class MusicAssistantApi {
+@@ -787,6 +795,8 @@ export class MusicAssistantApi {
      album_types?: Array<AlbumType | string>,
      provider?: string | string[],
      genre?: number | number[],
 +    starts_from?: string,
++    starts_before?: string,
    ): Promise<Album[]> {
      return this.sendCommand("music/albums/library_items", {
        favorite,
-@@ -797,6 +802,7 @@ export class MusicAssistantApi {
+@@ -797,6 +807,8 @@ export class MusicAssistantApi {
        album_types,
        provider,
        genre,
 +      starts_from,
++      starts_before,
      });
    }
  
-@@ -850,6 +856,7 @@ export class MusicAssistantApi {
+@@ -850,6 +862,8 @@ export class MusicAssistantApi {
      order_by?: string,
      provider?: string | string[],
      genre?: number | number[],
 +    starts_from?: string,
++    starts_before?: string,
    ): Promise<Playlist[]> {
      return this.sendCommand("music/playlists/library_items", {
        favorite,
-@@ -859,6 +866,7 @@ export class MusicAssistantApi {
+@@ -859,6 +873,8 @@ export class MusicAssistantApi {
        order_by,
        provider,
        genre,
 +      starts_from,
++      starts_before,
      });
    }
  
-@@ -1057,6 +1065,7 @@ export class MusicAssistantApi {
+@@ -1057,6 +1073,8 @@ export class MusicAssistantApi {
      order_by?: string,
      provider?: string | string[],
      genre?: number | number[],
 +    starts_from?: string,
++    starts_before?: string,
    ): Promise<Radio[]> {
      return this.sendCommand("music/radios/library_items", {
        favorite,
-@@ -1066,6 +1075,7 @@ export class MusicAssistantApi {
+@@ -1066,6 +1084,8 @@ export class MusicAssistantApi {
        order_by,
        provider,
        genre,
 +      starts_from,
++      starts_before,
      });
    }
  
-@@ -1119,6 +1129,7 @@ export class MusicAssistantApi {
+@@ -1119,6 +1139,8 @@ export class MusicAssistantApi {
      provider?: string | string[],
      genre?: number | number[],
      collapse_collections?: boolean,
 +    starts_from?: string,
++    starts_before?: string,
    ): Promise<(Audiobook | MediaCollection<Audiobook>)[]> {
      return this.sendCommand("music/audiobooks/library_items", {
        favorite,
-@@ -1129,6 +1140,7 @@ export class MusicAssistantApi {
+@@ -1129,6 +1151,8 @@ export class MusicAssistantApi {
        provider,
        genre,
        collapse_collections,
 +      starts_from,
++      starts_before,
      });
    }
  
-@@ -1179,6 +1191,7 @@ export class MusicAssistantApi {
+@@ -1179,6 +1203,8 @@ export class MusicAssistantApi {
      order_by?: string,
      provider?: string | string[],
      genre?: number | number[],
 +    starts_from?: string,
++    starts_before?: string,
    ): Promise<Podcast[]> {
      return this.sendCommand("music/podcasts/library_items", {
        favorite,
-@@ -1188,6 +1201,7 @@ export class MusicAssistantApi {
+@@ -1188,6 +1214,8 @@ export class MusicAssistantApi {
        order_by,
        provider,
        genre,
 +      starts_from,
++      starts_before,
      });
    }
  
-@@ -1208,6 +1222,7 @@ export class MusicAssistantApi {
+@@ -1208,6 +1236,8 @@ export class MusicAssistantApi {
      opts: {
        favorite?: boolean;
        search?: string;
 +      starts_from?: string;
++      starts_before?: string;
        limit?: number;
        offset?: number;
        order_by?: string;
@@ -353,7 +550,7 @@ index a00432b..01077fd 100644
          "show_all_genres": "Show all genres",
          "filter_hide_fully_played": "Hide fully-played episodes",
 diff --git a/src/views/LibraryAlbums.vue b/src/views/LibraryAlbums.vue
-index 5df1001..c0db189 100644
+index 5df1001..081205b 100644
 --- a/src/views/LibraryAlbums.vue
 +++ b/src/views/LibraryAlbums.vue
 @@ -6,6 +6,7 @@
@@ -364,11 +561,12 @@ index 5df1001..c0db189 100644
      :update-available="updateAvailable"
      :title="$t('albums')"
      :allow-key-hooks="true"
-@@ -84,10 +85,18 @@ const loadItems = async function (params: LoadDataParams) {
+@@ -84,10 +85,19 @@ const loadItems = async function (params: LoadDataParams) {
      params.albumType,
      params.provider && params.provider.length > 0 ? params.provider : undefined,
      params.genreIds,
 +    params.startsFrom,
++    params.startsBefore,
    );
  };
  
@@ -384,7 +582,7 @@ index 5df1001..c0db189 100644
      total.value = store.libraryAlbumsCount;
      return;
 diff --git a/src/views/LibraryArtists.vue b/src/views/LibraryArtists.vue
-index 235421f..640e4de 100644
+index 235421f..7604dd2 100644
 --- a/src/views/LibraryArtists.vue
 +++ b/src/views/LibraryArtists.vue
 @@ -12,6 +12,7 @@
@@ -395,11 +593,12 @@ index 235421f..640e4de 100644
      :icon="ArtistIcon"
      :restore-state="true"
      :total="total"
-@@ -65,10 +66,18 @@ const loadItems = async function (params: LoadDataParams) {
+@@ -65,10 +66,19 @@ const loadItems = async function (params: LoadDataParams) {
      params.provider && params.provider.length > 0 ? params.provider : undefined,
      params.genreIds,
      ArtistType.SINGER,
 +    params.startsFrom,
++    params.startsBefore,
    );
  };
  
@@ -415,7 +614,7 @@ index 235421f..640e4de 100644
    // The total will be determined by the actual results returned
    if (params.provider && params.provider.length > 0) {
 diff --git a/src/views/LibraryAudiobooks.vue b/src/views/LibraryAudiobooks.vue
-index b60ddfc..4e83d60 100644
+index b60ddfc..9b1936d 100644
 --- a/src/views/LibraryAudiobooks.vue
 +++ b/src/views/LibraryAudiobooks.vue
 @@ -8,6 +8,7 @@
@@ -426,23 +625,25 @@ index b60ddfc..4e83d60 100644
      :update-available="updateAvailable"
      :title="$t('audiobooks')"
      :allow-key-hooks="true"
-@@ -76,6 +77,7 @@ const loadItems = async function (params: LoadDataParams) {
+@@ -76,6 +77,8 @@ const loadItems = async function (params: LoadDataParams) {
      params.provider && params.provider.length > 0 ? params.provider : undefined,
      params.genreIds,
      params.collapseCollections,
 +    params.startsFrom,
++    params.startsBefore,
    );
  };
  
-@@ -96,6 +98,7 @@ const loadItemsAuthorsNarrators = async (
+@@ -96,6 +99,8 @@ const loadItemsAuthorsNarrators = async (
      params.provider && params.provider.length > 0 ? params.provider : undefined,
      params.genreIds,
      artistType,
 +    params.startsFrom,
++    params.startsBefore,
    );
  };
  
-@@ -109,6 +112,13 @@ const setTotals = async function (
+@@ -109,6 +114,13 @@ const setTotals = async function (
    params: LoadDataParams,
    artistType?: ArtistType,
  ) {
@@ -457,7 +658,7 @@ index b60ddfc..4e83d60 100644
    // The total will be determined by the actual results returned
    if (params.provider && params.provider.length > 0) {
 diff --git a/src/views/LibraryGenres.vue b/src/views/LibraryGenres.vue
-index ae8eec5..d8be35e 100644
+index ae8eec5..eaa2c87 100644
 --- a/src/views/LibraryGenres.vue
 +++ b/src/views/LibraryGenres.vue
 @@ -19,6 +19,7 @@
@@ -468,16 +669,17 @@ index ae8eec5..d8be35e 100644
      :limit="50"
      :infinite-scroll="false"
      :load-paged-data="section.load"
-@@ -70,6 +71,7 @@ const loadSection = (contentType: MediaType | "music") => {
+@@ -70,6 +71,8 @@ const loadSection = (contentType: MediaType | "music") => {
        content_type: contentType,
        favorite: params.favoritesOnly || undefined,
        search: params.search,
 +      starts_from: params.startsFrom,
++      starts_before: params.startsBefore,
        limit: params.limit,
        offset: params.offset,
        order_by: params.sortBy,
 diff --git a/src/views/LibraryPlaylists.vue b/src/views/LibraryPlaylists.vue
-index 9505316..523567a 100644
+index 9505316..40bdc3a 100644
 --- a/src/views/LibraryPlaylists.vue
 +++ b/src/views/LibraryPlaylists.vue
 @@ -9,6 +9,7 @@
@@ -488,11 +690,12 @@ index 9505316..523567a 100644
      :update-available="updateAvailable"
      :title="$t('playlists')"
      :allow-key-hooks="true"
-@@ -79,10 +80,18 @@ const loadItems = async function (params: LoadDataParams) {
+@@ -79,10 +80,19 @@ const loadItems = async function (params: LoadDataParams) {
      params.sortBy,
      params.provider && params.provider.length > 0 ? params.provider : undefined,
      params.genreIds,
 +    params.startsFrom,
++    params.startsBefore,
    );
  };
  
@@ -508,7 +711,7 @@ index 9505316..523567a 100644
      total.value = store.libraryPlaylistsCount;
      return;
 diff --git a/src/views/LibraryPodcasts.vue b/src/views/LibraryPodcasts.vue
-index 7afe3d2..a504ae7 100644
+index 7afe3d2..c3e4f7b 100644
 --- a/src/views/LibraryPodcasts.vue
 +++ b/src/views/LibraryPodcasts.vue
 @@ -8,6 +8,7 @@
@@ -519,11 +722,12 @@ index 7afe3d2..a504ae7 100644
      :update-available="updateAvailable"
      :title="$t('podcasts')"
      :allow-key-hooks="true"
-@@ -62,10 +63,18 @@ const loadItems = async function (params: LoadDataParams) {
+@@ -62,10 +63,19 @@ const loadItems = async function (params: LoadDataParams) {
      params.sortBy,
      params.provider && params.provider.length > 0 ? params.provider : undefined,
      params.genreIds,
 +    params.startsFrom,
++    params.startsBefore,
    );
  };
  
@@ -539,7 +743,7 @@ index 7afe3d2..a504ae7 100644
      total.value = store.libraryPodcastsCount;
      return;
 diff --git a/src/views/LibraryRadios.vue b/src/views/LibraryRadios.vue
-index 6e27292..63ae086 100644
+index 6e27292..ecd928b 100644
 --- a/src/views/LibraryRadios.vue
 +++ b/src/views/LibraryRadios.vue
 @@ -8,6 +8,7 @@
@@ -550,11 +754,12 @@ index 6e27292..63ae086 100644
      :update-available="updateAvailable"
      :title="$t('radios')"
      :show-search-button="true"
-@@ -111,10 +112,18 @@ const loadItems = async function (params: LoadDataParams) {
+@@ -111,10 +112,19 @@ const loadItems = async function (params: LoadDataParams) {
      params.sortBy,
      params.provider && params.provider.length > 0 ? params.provider : undefined,
      params.genreIds,
 +    params.startsFrom,
++    params.startsBefore,
    );
  };
  
@@ -570,7 +775,7 @@ index 6e27292..63ae086 100644
      total.value = store.libraryRadiosCount;
      return;
 diff --git a/src/views/LibraryTracks.vue b/src/views/LibraryTracks.vue
-index c688af3..0791207 100644
+index c688af3..83e2998 100644
 --- a/src/views/LibraryTracks.vue
 +++ b/src/views/LibraryTracks.vue
 @@ -8,6 +8,7 @@
@@ -581,11 +786,12 @@ index c688af3..0791207 100644
      :show-album="true"
      :update-available="updateAvailable"
      :title="$t('tracks')"
-@@ -118,10 +119,18 @@ const loadItems = async function (params: LoadDataParams) {
+@@ -118,10 +119,19 @@ const loadItems = async function (params: LoadDataParams) {
      params.sortBy,
      params.provider && params.provider.length > 0 ? params.provider : undefined,
      params.genreIds,
 +    params.startsFrom,
++    params.startsBefore,
    );
  };
  
