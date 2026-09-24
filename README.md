@@ -2,8 +2,10 @@
 
 A Home Assistant add-on repository. It serves two add-ons:
 
-- **Music Assistant (Pocket Casts Up Next)** — Music Assistant **stable** with a set
-  of Pocket Casts patches applied, rebuilt automatically as upstream releases.
+- **Music Assistant+** — Music Assistant **stable** with the patches in `patches/`
+  applied, rebuilt automatically as upstream releases. Every one of them is open
+  upstream too, so the name deliberately does not list them: as they land, they
+  leave this build and it gets closer to plain upstream.
 - **Audiobookshelf** — upstream's own image, wrapped as an add-on. Nothing is
   rebuilt; see [Audiobookshelf](#audiobookshelf) below.
 

@@ -1,7 +1,7 @@
-name: "Music Assistant (Pocket Casts Up Next)"
+name: "Music Assistant+"
 version: "2.10.4-upnext.4"
 slug: "music_assistant_upnext_test"
-description: "Music Assistant stable with the Pocket Casts Up Next patches applied"
+description: "Music Assistant stable, plus patches that are open upstream but not merged yet: the Pocket Casts Up Next queue as a podcast, episode show notes, and an A-Z jump for large libraries"
 url: "https://github.com/ollisulopuisto/music-assistant-patched-repo"
 arch:
   - aarch64
