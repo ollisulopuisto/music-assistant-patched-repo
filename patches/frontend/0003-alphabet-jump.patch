@@ -11,8 +11,8 @@ Library views that support a name order gain a strip pinned under the toolbar - 
 whole alphabet visible at once, led by '#' for the top of the listing, where names
 that start with a digit and names that reduce to nothing already sort. Picking a
 letter asks the server to start the listing there. Radios use display-name order so
-the server boundary matches the visible name. Playlists, tracks and podcasts keep
-their headers pinned but omit the strip while their paging or jumps are unreliable.
+the server boundary matches the visible name. Audiobooks, playlists, tracks and podcasts keep their headers pinned but omit the
+strip while their paging or jumps are unreliable.
 
 Scrolling then works in both directions. Down needs nothing new: the letters after
 the jump are still in the listing. Up asks for the mirror - the items before the
@@ -625,7 +625,7 @@ index b60ddfc..9b1936d 100644
      :load-paged-data="loadItems"
      :show-library="true"
      :sort-keys="sortKeys"
-+    :show-alphabet-jump="true"
++    :pin-listing-header="true"
      :update-available="updateAvailable"
      :title="$t('audiobooks')"
      :allow-key-hooks="true"
