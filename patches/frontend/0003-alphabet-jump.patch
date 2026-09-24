@@ -722,7 +722,7 @@ index 7afe3d2..c3e4f7b 100644
      :load-paged-data="loadItems"
      :show-library="true"
      :sort-keys="sortKeys"
-+    :pin-listing-header="true"
++    :show-alphabet-jump="true"
      :update-available="updateAvailable"
      :title="$t('podcasts')"
      :allow-key-hooks="true"
