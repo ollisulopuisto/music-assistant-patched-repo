@@ -1041,8 +1041,8 @@ instead.
 Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01VpS6zTXcRdworxLZ6Dp1De
 ---
- src/components/ItemsListing.vue | 53 +++++++++++++++++++++++++++++++-----
- 1 file changed, 50 insertions(+), 3 deletions(-)
+ src/components/ItemsListing.vue | 58 +++++++++++++++++++++++++++++++++-----
+ 1 file changed, 55 insertions(+), 3 deletions(-)
 
 diff --git a/src/components/ItemsListing.vue b/src/components/ItemsListing.vue
 index 5d78ff0..3372403 100644
@@ -1072,7 +1072,7 @@ index 5d78ff0..3372403 100644
  const listingMediaType = computed(() => MEDIA_TYPE_BY_ITEMTYPE[props.itemtype]);
  const searchLabel = computed(() => {
    const mediaType = listingMediaType.value;
-@@ -1027,13 +1036,30 @@ const onScrollProbeLetter = function () {
+@@ -1027,13 +1036,35 @@ const onScrollProbeLetter = function () {
    });
  };
  
@@ -1099,8 +1099,13 @@ index 5d78ff0..3372403 100644
 +  const scroller = scrollParent();
 +  const listing = listingRef.value;
 +  if (!scroller || !listing) return;
-+  const offset =
-+    listing.getBoundingClientRect().top - scroller.getBoundingClientRect().top;
++  // The root scroller's rect may move with the document; for it, the viewport top is 0.
++  const isDocumentScroller =
++    scroller === document.scrollingElement ||
++    scroller === document.documentElement ||
++    scroller === document.body;
++  const scrollportTop = isDocumentScroller ? 0 : scroller.getBoundingClientRect().top;
++  const offset = listing.getBoundingClientRect().top - scrollportTop;
 +  if (offset) scroller.scrollTop += offset;
  };
  

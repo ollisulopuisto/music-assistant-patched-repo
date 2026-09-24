@@ -35,12 +35,12 @@ Claude-Session: https://claude.ai/code/session_01VpS6zTXcRdworxLZ6Dp1De
  .../controllers/music/media/albums.py         |   4 +
  .../controllers/music/media/artists.py        |   4 +
  .../controllers/music/media/audiobooks.py     |  10 +
- .../controllers/music/media/base.py           |  83 +++++++-
+ .../controllers/music/media/base.py           |  86 +++++++-
  .../controllers/music/media/genres.py         |   4 +
  .../controllers/music/media/podcasts.py       |   6 +-
  .../controllers/music/media/tracks.py         |   4 +
- .../music/test_library_first_letter_jump.py   | 201 ++++++++++++++++++
- 8 files changed, 314 insertions(+), 2 deletions(-)
+ .../music/test_library_first_letter_jump.py   | 217 ++++++++++++++++++
+ 8 files changed, 334 insertions(+), 1 deletion(-)
  create mode 100644 tests/controllers/music/test_library_first_letter_jump.py
 
 diff --git a/music_assistant/controllers/music/media/albums.py b/music_assistant/controllers/music/media/albums.py
@@ -265,7 +265,7 @@ index 05461e7d2..bf4c06766 100644
                  genre_ids=genre_ids,
                  provider_filter=provider_filter,
                  played_only=played_only,
-@@ -1777,6 +1811,38 @@ class MediaControllerBase[ItemCls: "MediaItemType"](metaclass=ABCMeta):
+@@ -1777,6 +1811,42 @@ class MediaControllerBase[ItemCls: "MediaItemType"](metaclass=ABCMeta):
          """Return the SQL WHERE clause fragment used for search filtering."""
          return search_name_match_clause(self.db_table, search, "search", query_params)
  
@@ -284,7 +284,7 @@ index 05461e7d2..bf4c06766 100644
 +        :param order_by: The ordering this query will use, which decides which name column
 +            the letter is compared against.
 +        :param query_params: Query params dict; the clause's bound params are added to it.
-+        :param below: Keep what sorts below the letter, instead of what sorts at or above it.
++        :param below: Keep the side before the jump when the listing order is reversed.
 +        :raises ValueError: If the letter is not a single ASCII letter.
 +        """
 +        letter = letter_value.lower()
@@ -295,11 +295,15 @@ index 05461e7d2..bf4c06766 100644
 +        # not agree with: sorted by sort name, "The Beatles" is filed under B, not under T
 +        name_column = "search_name" if order_by in ("name", "name_desc") else "search_sort_name"
 +        column = f"{self.db_table}.{name_column}"
-+        # an open-ended bound rather than LIKE 'x%': the items on the far side of the letter
-+        # are what make this a jump instead of a filter, and it still seeks into the index
++        # An exclusive next-letter bound includes every name filed under this letter.
++        # Descending queries reverse which side of the boundary the listing displays.
++        descending = order_by in ("name_desc", "sort_name_desc")
++        use_upper_bound = descending != below
++        boundary = chr(ord(letter) + 1) if use_upper_bound else letter
++        operator = "<" if descending else ">="
 +        param = "starts_before" if below else "starts_from"
-+        query_params[param] = letter
-+        return f"{column} < :{param}" if below else f"{column} >= :{param}"
++        query_params[param] = boundary
++        return f"{column} {operator} :{param}"
 +
      @final
      def _preprocess_search(self, search: str | None) -> str | None:
@@ -432,7 +436,7 @@ new file mode 100644
 index 000000000..5c785c70d
 --- /dev/null
 +++ b/tests/controllers/music/test_library_first_letter_jump.py
-@@ -0,0 +1,201 @@
+@@ -0,0 +1,217 @@
 +"""
 +Tests for the first-letter jump on library listings.
 +
@@ -524,6 +528,22 @@ index 000000000..5c785c70d
 +async def test_it_follows_the_plain_name(lettered_mass: MusicAssistant) -> None:
 +    """Sorted by name, the same artist is filed under T, so a jump to T reaches it."""
 +    assert "The Beatles" in await _names(lettered_mass, starts_from="t", order_by="name")
++
++
++async def test_descending_jump_starts_at_the_letter(lettered_mass: MusicAssistant) -> None:
++    """A descending listing starts with the selected letter, then runs toward A."""
++    from_s = await _names(lettered_mass, starts_from="s", order_by="name_desc")
++    assert from_s[0] == "Sigur Rós"
++    assert "Talk Talk" not in from_s
++    assert "Tool" not in from_s
++
++
++async def test_descending_listing_can_page_back_above_the_letter(
++    lettered_mass: MusicAssistant,
++) -> None:
++    """The reversed query returns the next higher letter nearest-first."""
++    before_s = await _names(lettered_mass, starts_before="s", order_by="name")
++    assert before_s == ["Talk Talk", "The Beatles", "Tool"]
 +
 +
 +async def test_diacritics_are_folded(lettered_mass: MusicAssistant) -> None:
