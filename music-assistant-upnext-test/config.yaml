@@ -49,6 +49,7 @@ backup_exclude:
 
 panel_icon: mdi:playlist-music
 panel_title: Music Assistant
+panel_admin: false
 options:
   log_level: info
 schema:
