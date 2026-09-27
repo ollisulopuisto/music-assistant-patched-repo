@@ -18,7 +18,7 @@
 **Steps:**
 1. Preserve the existing Pocket Casts test step.
 2. Install FFmpeg in the hosted runner because `tests/helpers/test_ffmpeg.py` invokes the executable directly.
-3. Add a pytest step for the eight test modules modified by patches `0120`–`0122`.
+3. Add a pytest step for the seven directly relevant modules modified by patches `0120`–`0122`, and invoke only the relevant FFmpeg tests by node ID.
 4. Check workflow formatting and diff whitespace.
 5. Run the equivalent pytest command against the exact upstream release once that source is available; until then, let strict patch application and hosted CI validate the release checkout.
 

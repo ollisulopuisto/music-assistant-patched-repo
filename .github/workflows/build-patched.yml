@@ -295,8 +295,15 @@ jobs:
             tests/controllers/streams/test_flow_format.py \
             tests/helpers/test_audio.py \
             tests/helpers/test_dsp.py \
-            tests/helpers/test_ffmpeg.py \
             tests/providers/filesystem/test_sync_config.py
+          # Run the FFmpeg cases that cover our changed layout/downmix logic. The
+          # rest of this upstream module includes an afir=irnorm integration test,
+          # an option absent from the runner's FFmpeg build.
+          python -m pytest -q \
+            tests/helpers/test_ffmpeg.py::test_get_ffmpeg_args_downmixes_multichannel_for_single_channel_output \
+            tests/helpers/test_ffmpeg.py::test_get_ffmpeg_args_names_known_channel_layouts \
+            tests/helpers/test_ffmpeg.py::test_get_ffmpeg_args_omits_ambiguous_layouts \
+            tests/helpers/test_ffmpeg.py::test_multichannel_pcm_folds_down_without_stretching
 
   build:
     name: Build ${{ matrix.arch }}
