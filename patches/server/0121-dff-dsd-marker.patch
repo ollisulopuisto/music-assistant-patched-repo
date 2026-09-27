@@ -1,0 +1,68 @@
+Subject: [PATCH] Recognize DFF streams as DSD for PCM buffer accounting
+
+diff --git a/music_assistant/providers/filesystem_local/__init__.py b/music_assistant/providers/filesystem_local/__init__.py
+index 71eaff8..37a7668 100644
+--- a/music_assistant/providers/filesystem_local/__init__.py
++++ b/music_assistant/providers/filesystem_local/__init__.py
+@@ -2420,6 +2420,16 @@ class LocalFileSystemProvider(MusicProvider):
+                 return ContentType.try_parse(codec_name)
+         return ContentType.UNKNOWN
+ 
++    @staticmethod
++    def _content_type_from_file_item(file_item: FileSystemItem, tags: AudioTags) -> ContentType:
++        """Return the container type, using DSF as the marker for DFF DSD audio."""
++        extension = (file_item.ext or tags.format or "").lower().lstrip(".")
++        if extension == "dff":
++            # The shared models have a DSF type but no generic DFF/DST type. Mark DFF as
++            # DSD so its packed source depth and byte rate are not mistaken for PCM.
++            return ContentType.DSF
++        return ContentType.try_parse(extension)
++
+     async def _parse_track(
+         self, file_item: FileSystemItem, tags: AudioTags, full_album_metadata: bool = False
+     ) -> Track:
+@@ -2445,7 +2455,7 @@ class LocalFileSystemProvider(MusicProvider):
+                     provider_domain=self.domain,
+                     provider_instance=self.instance_id,
+                     audio_format=AudioFormat(
+-                        content_type=ContentType.try_parse(file_item.ext or tags.format),
++                        content_type=self._content_type_from_file_item(file_item, tags),
+                         codec_type=self._codec_type_from_tags(tags),
+                         sample_rate=tags.sample_rate,
+                         bit_depth=tags.bits_per_sample,
+@@ -2828,7 +2838,7 @@ class LocalFileSystemProvider(MusicProvider):
+                     provider_domain=self.domain,
+                     provider_instance=self.instance_id,
+                     audio_format=AudioFormat(
+-                        content_type=ContentType.try_parse(file_item.ext or tags.format),
++                        content_type=self._content_type_from_file_item(file_item, tags),
+                         codec_type=self._codec_type_from_tags(tags),
+                         sample_rate=tags.sample_rate,
+                         bit_depth=tags.bits_per_sample,
+@@ -2928,7 +2938,7 @@ class LocalFileSystemProvider(MusicProvider):
+                     provider_domain=self.domain,
+                     provider_instance=self.instance_id,
+                     audio_format=AudioFormat(
+-                        content_type=ContentType.try_parse(file_item.ext or tags.format),
++                        content_type=self._content_type_from_file_item(file_item, tags),
+                         codec_type=self._codec_type_from_tags(tags),
+                         sample_rate=tags.sample_rate,
+                         bit_depth=tags.bits_per_sample,
+@@ -3053,7 +3063,7 @@ class LocalFileSystemProvider(MusicProvider):
+                     provider_domain=self.domain,
+                     provider_instance=self.instance_id,
+                     audio_format=AudioFormat(
+-                        content_type=ContentType.try_parse(file_item.ext or tags.format),
++                        content_type=self._content_type_from_file_item(file_item, tags),
+                         codec_type=self._codec_type_from_tags(tags),
+                         sample_rate=tags.sample_rate,
+                         bit_depth=tags.bits_per_sample,
+@@ -3446,7 +3456,7 @@ class LocalFileSystemProvider(MusicProvider):
+             provider=self.instance_id,
+             item_id=item_id,
+             audio_format=AudioFormat(
+-                content_type=ContentType.try_parse(file_item.ext or tags.format),
++                content_type=self._content_type_from_file_item(file_item, tags),
+                 codec_type=self._codec_type_from_tags(tags),
+                 sample_rate=tags.sample_rate,
+                 bit_depth=tags.bits_per_sample,

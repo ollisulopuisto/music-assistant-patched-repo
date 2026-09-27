@@ -1,0 +1,295 @@
+Subject: [PATCH] Preserve direct DSD stereo downmix gain
+diff --git a/music_assistant/controllers/streams/audio_analysis.py b/music_assistant/controllers/streams/audio_analysis.py
+index 091852c..374a025 100644
+--- a/music_assistant/controllers/streams/audio_analysis.py
++++ b/music_assistant/controllers/streams/audio_analysis.py
+@@ -1542,6 +1542,7 @@ class AudioAnalysisController:
+                     audio_input=_iter_input_chunks(),
+                     input_format=input_format,
+                     output_format=analysis_format,
++                    preserve_dsd_downmix_gain=audio_buffer.preserve_dsd_downmix_gain,
+                 ):
+                     pending.extend(chunk)
+                     while len(pending) >= pcm_bytes_per_second:
+diff --git a/music_assistant/controllers/streams/audio_buffer.py b/music_assistant/controllers/streams/audio_buffer.py
+index 87c5f3b..f6478c9 100644
+--- a/music_assistant/controllers/streams/audio_buffer.py
++++ b/music_assistant/controllers/streams/audio_buffer.py
+@@ -89,6 +89,7 @@ class AudioBuffer:
+         mode: BufferMode = BufferMode.SEEKABLE,
+         ready_threshold: int = 1,
+         is_realtime: bool = False,
++        preserve_dsd_downmix_gain: bool = False,
+     ) -> None:
+         """
+         Initialize AudioBuffer.
+@@ -98,9 +99,12 @@ class AudioBuffer:
+         :param mode: Buffer mode (SEEKABLE for tracks, ROLLING for radio).
+         :param ready_threshold: Seconds of audio to buffer before signaling ready.
+         :param is_realtime: Whether the source hands its audio over at playback pace.
++        :param preserve_dsd_downmix_gain: Preserve the direct DSD-to-stereo gain when
++            this DSD source is buffered as multichannel float PCM.
+         """
+         self.pcm_format = pcm_format
+         self.is_realtime = is_realtime
++        self.preserve_dsd_downmix_gain = preserve_dsd_downmix_gain
+         configured_max_size = (
+             RADIO_BUFFER_SIZE if mode == BufferMode.ROLLING else BUFFER_SIZE_MAP[buffer_size]
+         )
+@@ -318,6 +322,7 @@ class AudioBuffer:
+             input_format=self.pcm_format,
+             output_format=output_format,
+             filter_params=filter_params,
++            preserve_dsd_downmix_gain=self.preserve_dsd_downmix_gain,
+         ):
+             yield chunk
+ 
+@@ -878,6 +883,10 @@ def _new_buffer(
+         mode,
+         ready_threshold=ready_threshold,
+         is_realtime=streamdetails.is_realtime,
++        preserve_dsd_downmix_gain=(
++            is_dsd_audio_format(arriving_audio_format(streamdetails))
++            and arriving_audio_format(streamdetails).channels > 2
++        ),
+     )
+     # align chunk numbering with the actual stream start position so that
+     # get_raw_stream(seek_position_ms) requests the correct chunk number
+@@ -917,14 +926,24 @@ def _buffer_pcm_format(streamdetails: StreamDetails) -> AudioFormat:
+     """
+     arriving = arriving_audio_format(streamdetails)
+     sample_rate = preferred_pcm_sample_rate(arriving)
++    is_dsd = is_dsd_audio_format(arriving)
+     bit_depth = arriving.bit_depth
+-    if is_dsd_audio_format(arriving):
++    content_type = ContentType.from_bit_depth(bit_depth)
++    if is_dsd:
+         # DSD is stored in packed one-bit bytes; the decoded buffer is 24-bit PCM.
+         # FFmpeg exposes DSD64 at 352.8 kHz (one sample per byte); the selected
+         # PCM target is 176.4 kHz to keep the buffer size practical.
+-        bit_depth = 24
++        if arriving.channels > 2:
++            # Keep the decoder's float output for surround DSD. An integer buffer
++            # makes FFmpeg normalize the later stereo rematrix for clipping safety,
++            # unlike the original direct DSD-to-stereo path.
++            content_type = ContentType.PCM_F32LE
++            bit_depth = 32
++        else:
++            content_type = ContentType.PCM_S24LE
++            bit_depth = 24
+     return AudioFormat(
+-        content_type=ContentType.from_bit_depth(bit_depth),
++        content_type=content_type,
+         sample_rate=sample_rate,
+         bit_depth=bit_depth,
+         channels=min(arriving.channels, 8),
+diff --git a/music_assistant/helpers/ffmpeg.py b/music_assistant/helpers/ffmpeg.py
+index a1266de..d9c22e2 100644
+--- a/music_assistant/helpers/ffmpeg.py
++++ b/music_assistant/helpers/ffmpeg.py
+@@ -106,6 +106,7 @@ class FFMpeg(AsyncProcess):
+         audio_output: str | int = "-",
+         collect_log_history: bool = False,
+         loglevel: str = "info",
++        preserve_dsd_downmix_gain: bool = False,
+     ) -> None:
+         """Initialize AsyncProcess."""
+         ffmpeg_args = get_ffmpeg_args(
+@@ -117,6 +118,7 @@ class FFMpeg(AsyncProcess):
+             extra_input_args=extra_input_args or [],
+             extra_output_args=extra_output_args or [],
+             loglevel=loglevel,
++            preserve_dsd_downmix_gain=preserve_dsd_downmix_gain,
+         )
+         self.audio_input = audio_input
+         self.input_format = input_format
+@@ -405,6 +407,7 @@ async def get_ffmpeg_stream(
+     chunk_size: int | None = None,
+     extra_input_args: list[str] | None = None,
+     extra_output_args: list[str] | None = None,
++    preserve_dsd_downmix_gain: bool = False,
+ ) -> AsyncGenerator[bytes]:
+     """
+     Get the ffmpeg audio stream as async generator.
+@@ -420,6 +423,7 @@ async def get_ffmpeg_stream(
+         extra_input_args=extra_input_args,
+         extra_output_args=extra_output_args,
+         collect_log_history=True,
++        preserve_dsd_downmix_gain=preserve_dsd_downmix_gain,
+     ) as ffmpeg_proc:
+         # read final chunks from stdout
+         iterator = ffmpeg_proc.iter_chunked(chunk_size) if chunk_size else ffmpeg_proc.iter_any()
+@@ -526,6 +530,7 @@ def get_ffmpeg_args(
+     extra_input_args: list[str] | None = None,
+     extra_output_args: list[str] | None = None,
+     loglevel: str = "error",
++    preserve_dsd_downmix_gain: bool = False,
+ ) -> list[str]:
+     """Collect all args to send to the ffmpeg process."""
+     filter_params = list(filter_params)
+@@ -656,7 +661,9 @@ def get_ffmpeg_args(
+ 
+     # runs ahead of the caller's own filters, so channel-aware ones such as the
+     # per-channel preamp see the conformed layout instead of the source layout
+-    if channel_filter := _get_channel_conform_filter(input_format.channels, output_format.channels):
++    if channel_filter := _get_channel_conform_filter(
++        input_format, output_format, preserve_dsd_downmix_gain=preserve_dsd_downmix_gain
++    ):
+         filter_params = [channel_filter, *filter_params]
+ 
+     if resample_filter := get_ffmpeg_resample_filter(
+@@ -785,16 +792,25 @@ def _get_channel_layout_name(channels: int) -> str | None:
+     return None
+ 
+ 
+-def _get_channel_conform_filter(input_channels: int, output_channels: int) -> str | None:
++def _get_channel_conform_filter(
++    input_format: AudioFormat,
++    output_format: AudioFormat,
++    preserve_dsd_downmix_gain: bool = False,
++) -> str | None:
+     """
+     Return the filter that maps the source onto the output channel count, if one is needed.
+ 
+-    :param input_channels: Channel count entering FFmpeg.
+-    :param output_channels: Channel count the output is encoded at.
++    :param input_format: Format entering FFmpeg.
++    :param output_format: Format the output is encoded at.
+     :return: The filter to run before any caller supplied ones, or None when the
+         source already carries the requested channel count.
+     """
+-    if input_channels > 2 and output_channels <= 2:
++    if input_format.channels > 2 and output_format.channels <= 2:
++        if input_format.content_type == ContentType.PCM_F32LE and preserve_dsd_downmix_gain:
++            # Multichannel DSD is buffered as float so a later stereo downmix keeps
++            # the same gain as the original direct DSD->stereo path. The integer
++            # rematrix safety normalization would otherwise attenuate it by 7.7 dB.
++            return "aresample=out_chlayout=stereo:rematrix_maxval=1000"
+         # a single channel output needs this fold too, otherwise a mono/left/right pan
+         # would only see the front channels and silently drop the center and surround.
+         # aformat leaves the rematrix to ffmpeg, which picks the correct coefficients
+@@ -802,7 +818,7 @@ def _get_channel_conform_filter(input_channels: int, output_channels: int) -> st
+         # scales them to stay clip-safe). A fixed pan expression, naming channels that
+         # a given layout may not even have, can do neither.
+         return "aformat=channel_layouts=stereo"
+-    if input_channels == 1 and output_channels > 1:
++    if input_format.channels == 1 and output_format.channels > 1:
+         # duplicate rather than leaving the widening to ffmpeg, whose rematrix
+         # spreads the source at 1/sqrt(2) per channel and so costs 3 dB
+         return "pan=stereo|c0=c0|c1=c0"
+diff --git a/tests/controllers/streams/test_audio_analysis_controller.py b/tests/controllers/streams/test_audio_analysis_controller.py
+index f958c2b..fe2e3ae 100644
+--- a/tests/controllers/streams/test_audio_analysis_controller.py
++++ b/tests/controllers/streams/test_audio_analysis_controller.py
+@@ -215,6 +215,7 @@ async def test_multichannel_buffer_is_downmixed_for_analysis_only(
+         audio_input: AsyncGenerator[bytes],
+         input_format: AudioFormat,
+         output_format: AudioFormat,
++        **_kwargs: object,
+     ) -> AsyncGenerator[bytes]:
+         assert input_format.channels == 6
+         assert output_format.channels == 2
+diff --git a/tests/controllers/streams/test_audio_buffer.py b/tests/controllers/streams/test_audio_buffer.py
+index c5c1baa..b4dc704 100644
+--- a/tests/controllers/streams/test_audio_buffer.py
++++ b/tests/controllers/streams/test_audio_buffer.py
+@@ -142,8 +142,14 @@ def test_high_resolution_multichannel_buffer_is_memory_capped() -> None:
+     assert buf.max_size_seconds * pcm_format.pcm_sample_size <= MAX_BUFFER_SIZE_BYTES
+ 
+ 
+-def test_dsd_buffer_format_uses_decoded_pcm_size_and_rate() -> None:
+-    """Packed DSD is buffered using its decoded PCM rate, depth and channel count."""
++@pytest.mark.parametrize(
++    ("channels", "expected_content_type", "expected_bit_depth"),
++    [(6, ContentType.PCM_F32LE, 32), (2, ContentType.PCM_S24LE, 24)],
++)
++def test_dsd_buffer_format_uses_decoded_pcm_size_and_rate(
++    channels: int, expected_content_type: ContentType, expected_bit_depth: int
++) -> None:
++    """Surround DSD keeps float headroom; stereo DSD uses compact 24-bit PCM."""
+     streamdetails = MagicMock()
+     streamdetails.decoded_audio_format = None
+     streamdetails.audio_format = AudioFormat(
+@@ -151,15 +157,15 @@ def test_dsd_buffer_format_uses_decoded_pcm_size_and_rate() -> None:
+         codec_type=ContentType.DSD_LSBF_PLANAR,
+         sample_rate=352800,
+         bit_depth=1,
+-        channels=6,
++        channels=channels,
+     )
+ 
+     pcm_format = _buffer_pcm_format(streamdetails)
+ 
+-    assert pcm_format.content_type == ContentType.PCM_S24LE
++    assert pcm_format.content_type == expected_content_type
+     assert pcm_format.sample_rate == 176400
+-    assert pcm_format.bit_depth == 24
+-    assert pcm_format.channels == 6
++    assert pcm_format.bit_depth == expected_bit_depth
++    assert pcm_format.channels == channels
+ 
+ 
+ @pytest.mark.asyncio
+diff --git a/tests/helpers/test_ffmpeg.py b/tests/helpers/test_ffmpeg.py
+index 44f20ba..a0573dd 100644
+--- a/tests/helpers/test_ffmpeg.py
++++ b/tests/helpers/test_ffmpeg.py
+@@ -58,12 +58,35 @@ def test_get_ffmpeg_args_does_not_mutate_filters() -> None:
+     assert filter_params == ["volume=-1dB"]
+ 
+ 
+-def test_get_ffmpeg_args_downmixes_multichannel_for_single_channel_output() -> None:
++@pytest.mark.parametrize(
++    ("content_type", "bit_depth", "preserve_dsd_downmix_gain", "conform_filter"),
++    [
++        (
++            ContentType.PCM_F32LE,
++            32,
++            False,
++            "aformat=channel_layouts=stereo",
++        ),
++        (
++            ContentType.PCM_F32LE,
++            32,
++            True,
++            "aresample=out_chlayout=stereo:rematrix_maxval=1000",
++        ),
++        (ContentType.PCM_S24LE, 24, False, "aformat=channel_layouts=stereo"),
++    ],
++)
++def test_get_ffmpeg_args_downmixes_multichannel_for_single_channel_output(
++    content_type: ContentType,
++    bit_depth: int,
++    preserve_dsd_downmix_gain: bool,
++    conform_filter: str,
++) -> None:
+     """A surround source is folded to stereo before the output is narrowed to one channel."""
+     input_format = AudioFormat(
+-        content_type=ContentType.PCM_F32LE,
++        content_type=content_type,
+         sample_rate=48000,
+-        bit_depth=32,
++        bit_depth=bit_depth,
+         channels=6,
+     )
+     output_format = AudioFormat(
+@@ -73,12 +96,15 @@ def test_get_ffmpeg_args_downmixes_multichannel_for_single_channel_output() -> N
+         channels=1,
+     )
+ 
+-    args = get_ffmpeg_args(input_format, output_format, ["pan=mono|c0=0.5*FL+0.5*FR"])
++    args = get_ffmpeg_args(
++        input_format,
++        output_format,
++        ["pan=mono|c0=0.5*FL+0.5*FR"],
++        preserve_dsd_downmix_gain=preserve_dsd_downmix_gain,
++    )
+ 
+     filter_graph = args[args.index("-af") + 1]
+-    assert filter_graph.index("aformat=channel_layouts=stereo") < filter_graph.index(
+-        "pan=mono|c0=0.5*FL+0.5*FR"
+-    )
++    assert filter_graph.index(conform_filter) < filter_graph.index("pan=mono|c0=0.5*FL+0.5*FR")
+ 
+ 
+ def _split_at_input(args: list[str]) -> tuple[list[str], list[str]]:

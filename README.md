@@ -3,9 +3,9 @@
 A Home Assistant add-on repository. It serves two add-ons:
 
 - **Music Assistant+** — Music Assistant **stable** with the patches in `patches/`
-  applied, rebuilt automatically as upstream releases. Every one of them is open
-  upstream too, so the name deliberately does not list them: as they land, they
-  leave this build and it gets closer to plain upstream.
+  applied, rebuilt automatically as upstream releases. Patches are removed from
+  this build when their changes are accepted upstream, so the add-on stays close
+  to plain upstream while carrying the changes that are still local.
 - **Audiobookshelf** — upstream's own image, wrapped as an add-on. Nothing is
   rebuilt; see [Audiobookshelf](#audiobookshelf) below.
 
@@ -25,13 +25,16 @@ https://github.com/ollisulopuisto/music-assistant-patched-repo
 | `patches/server/0003-show-notes.patch` | Gives episodes in the mixed browse folders their show notes |
 | `patches/server/0004-library-first-letter-jump.patch` | Lets a library listing start at a first letter and run on from there, as an indexed comparison on the name column the current sort uses |
 | `patches/server/0100-install-patched-frontend.patch` | Installs the locally built frontend wheel over the one upstream pins |
+| `patches/server/0110-app-vars-from-data-dir.patch` | Reads private app credentials from the add-on data directory |
+| `patches/server/0120-dsd-multichannel-pcm.patch` | Preserves multichannel PCM for capable players, standardizes six-channel PCM as 5.1(side), retains stereo output, and converts DSD to PCM |
+| `patches/server/0121-dff-dsd-marker.patch` | Routes DFF and DST sources through the DSD buffer sizing path |
+| `patches/server/0122-preserve-dsd-stereo-downmix.patch` | Keeps stereo downmix gain consistent when multichannel DSD passes through the shared buffer |
 | `patches/frontend/0001-forbid-forms.patch` | Stops provider metadata rendering form controls (a feed-supplied `<form>` was a working phishing box) |
 | `patches/frontend/0002-show-notes.patch` | Shows an episode's notes in the list subtitle and in the fullscreen player's side panel, where lyrics go |
 | `patches/frontend/0003-alphabet-jump.patch` | Puts an A-Z strip above every library listing, so a big library is reachable without scrolling through it |
 
-Every one of these is also open as a pull request upstream. **When one is merged,
-delete its patch file and push** — the next build picks up the change from
-upstream instead, and the pipeline carries on unchanged.
+Patches with an upstream pull request should be removed when that change is merged;
+the next build will pick it up from upstream instead.
 
 ## Bundled credentials, and why Spotify needs a file
 

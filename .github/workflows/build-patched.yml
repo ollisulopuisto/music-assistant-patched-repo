@@ -275,6 +275,23 @@ jobs:
           # nothing. Architecture-independent, so this runs once rather than per-arch.
           python -m pytest tests/providers/pocketcasts -q
 
+      - name: Run multichannel and DSD regression tests
+        working-directory: source
+        run: |
+          set -euo pipefail
+          # These modules contain the regression coverage carried by patches 0120–0122.
+          # Keep them in the publish gate so a patch that applies but breaks its behavior
+          # cannot produce a new add-on image.
+          python -m pytest -q \
+            tests/controllers/streams/test_audio_analysis_controller.py \
+            tests/controllers/streams/test_audio_buffer.py \
+            tests/controllers/streams/test_buffer_pcm_format.py \
+            tests/controllers/streams/test_flow_format.py \
+            tests/helpers/test_audio.py \
+            tests/helpers/test_dsp.py \
+            tests/helpers/test_ffmpeg.py \
+            tests/providers/filesystem/test_sync_config.py
+
   build:
     name: Build ${{ matrix.arch }}
     needs: [resolve, frontend, verify]
