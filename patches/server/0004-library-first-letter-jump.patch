@@ -1,4 +1,4 @@
-From 41710be080edcac95cd436db87bd75d78bf7a738 Mon Sep 17 00:00:00 2001
+From c6e2fc4d64c76a73f12be23f1bd642d01ee977b9 Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
 Date: Wed, 23 Sep 2026 20:56:22 +0000
 Subject: [PATCH] Let a library listing start at a first letter
@@ -35,16 +35,16 @@ Claude-Session: https://claude.ai/code/session_01VpS6zTXcRdworxLZ6Dp1De
  .../controllers/music/media/albums.py         |   4 +
  .../controllers/music/media/artists.py        |   4 +
  .../controllers/music/media/audiobooks.py     |  10 +
- .../controllers/music/media/base.py           |  86 +++++++-
+ .../controllers/music/media/base.py           |  88 ++++++-
  .../controllers/music/media/genres.py         |   4 +
  .../controllers/music/media/podcasts.py       |   6 +-
  .../controllers/music/media/tracks.py         |   4 +
- .../music/test_library_first_letter_jump.py   | 217 ++++++++++++++++++
- 8 files changed, 334 insertions(+), 1 deletion(-)
+ .../music/test_library_first_letter_jump.py   | 226 ++++++++++++++++++
+ 8 files changed, 344 insertions(+), 2 deletions(-)
  create mode 100644 tests/controllers/music/test_library_first_letter_jump.py
 
 diff --git a/music_assistant/controllers/music/media/albums.py b/music_assistant/controllers/music/media/albums.py
-index 719012cb9..3790bf638 100644
+index 719012c..3790bf6 100644
 --- a/music_assistant/controllers/music/media/albums.py
 +++ b/music_assistant/controllers/music/media/albums.py
 @@ -166,6 +166,8 @@ class AlbumsController(MediaControllerBase[Album]):
@@ -66,7 +66,7 @@ index 719012cb9..3790bf638 100644
              limit=limit,
              offset=offset,
 diff --git a/music_assistant/controllers/music/media/artists.py b/music_assistant/controllers/music/media/artists.py
-index c543af61a..16d4dafc9 100644
+index c543af6..16d4daf 100644
 --- a/music_assistant/controllers/music/media/artists.py
 +++ b/music_assistant/controllers/music/media/artists.py
 @@ -158,6 +158,8 @@ class ArtistsController(MediaControllerBase[Artist]):
@@ -88,7 +88,7 @@ index c543af61a..16d4dafc9 100644
              limit=limit,
              offset=offset,
 diff --git a/music_assistant/controllers/music/media/audiobooks.py b/music_assistant/controllers/music/media/audiobooks.py
-index ce1bcb933..a9a87da77 100644
+index ce1bcb9..a9a87da 100644
 --- a/music_assistant/controllers/music/media/audiobooks.py
 +++ b/music_assistant/controllers/music/media/audiobooks.py
 @@ -152,6 +152,8 @@ class AudiobooksController(MediaControllerBase[Audiobook]):
@@ -137,7 +137,7 @@ index ce1bcb933..a9a87da77 100644
              limit=limit,
              offset=offset,
 diff --git a/music_assistant/controllers/music/media/base.py b/music_assistant/controllers/music/media/base.py
-index 05461e7d2..bf4c06766 100644
+index 05461e7..83dbb2f 100644
 --- a/music_assistant/controllers/music/media/base.py
 +++ b/music_assistant/controllers/music/media/base.py
 @@ -429,6 +429,8 @@ class MediaControllerBase[ItemCls: "MediaItemType"](metaclass=ABCMeta):
@@ -308,16 +308,17 @@ index 05461e7d2..bf4c06766 100644
      @final
      def _preprocess_search(self, search: str | None) -> str | None:
          """Normalize the search string for use in the search filter clauses."""
-@@ -1809,6 +1875,8 @@ class MediaControllerBase[ItemCls: "MediaItemType"](metaclass=ABCMeta):
+@@ -1809,6 +1879,9 @@ class MediaControllerBase[ItemCls: "MediaItemType"](metaclass=ABCMeta):
          search: str | None,
          genre_ids: list[int] | None,
          provider_filter: list[str] | None,
 +        starts_from: str | None = None,
 +        starts_before: str | None = None,
++        order_by: str | None = None,
          played_only: bool = False,
          limit: int = 500,
          in_library_only: bool = False,
-@@ -1824,6 +1892,9 @@ class MediaControllerBase[ItemCls: "MediaItemType"](metaclass=ABCMeta):
+@@ -1824,6 +1897,9 @@ class MediaControllerBase[ItemCls: "MediaItemType"](metaclass=ABCMeta):
              query_params=query_params,
              favorite=favorite,
              search=search,
@@ -327,7 +328,7 @@ index 05461e7d2..bf4c06766 100644
              genre_ids=genre_ids,
              provider_filter=provider_filter,
              played_only=played_only,
-@@ -1849,7 +1920,7 @@ class MediaControllerBase[ItemCls: "MediaItemType"](metaclass=ABCMeta):
+@@ -1849,7 +1925,7 @@ class MediaControllerBase[ItemCls: "MediaItemType"](metaclass=ABCMeta):
          join_parts.clear()
  
      @final
@@ -336,7 +337,7 @@ index 05461e7d2..bf4c06766 100644
          self,
          query_parts: list[str],
          query_params: dict[str, Any],
-@@ -1857,6 +1928,9 @@ class MediaControllerBase[ItemCls: "MediaItemType"](metaclass=ABCMeta):
+@@ -1857,6 +1933,9 @@ class MediaControllerBase[ItemCls: "MediaItemType"](metaclass=ABCMeta):
          search: str | None,
          genre_ids: list[int] | None,
          provider_filter: list[str] | None,
@@ -346,7 +347,7 @@ index 05461e7d2..bf4c06766 100644
          played_only: bool = False,
          in_library_only: bool = False,
          reachable_via: list[str] | None = None,
-@@ -1865,6 +1939,13 @@ class MediaControllerBase[ItemCls: "MediaItemType"](metaclass=ABCMeta):
+@@ -1865,6 +1944,13 @@ class MediaControllerBase[ItemCls: "MediaItemType"](metaclass=ABCMeta):
          # handle search
          if search:
              query_parts.append(self._search_filter_clause(search, query_params))
@@ -361,7 +362,7 @@ index 05461e7d2..bf4c06766 100644
          if favorite is not None:
              query_parts.append(f"{self.db_table}.favorite = :favorite")
 diff --git a/music_assistant/controllers/music/media/genres.py b/music_assistant/controllers/music/media/genres.py
-index 61b3bcd6e..e7fd940e7 100644
+index 61b3bcd..e7fd940 100644
 --- a/music_assistant/controllers/music/media/genres.py
 +++ b/music_assistant/controllers/music/media/genres.py
 @@ -301,6 +301,8 @@ class GenreController(MediaControllerBase[Genre]):
@@ -383,7 +384,7 @@ index 61b3bcd6e..e7fd940e7 100644
              offset=offset,
              order_by=order_by,
 diff --git a/music_assistant/controllers/music/media/podcasts.py b/music_assistant/controllers/music/media/podcasts.py
-index 5773cfeb3..92e7814d7 100644
+index 5773cfe..92e7814 100644
 --- a/music_assistant/controllers/music/media/podcasts.py
 +++ b/music_assistant/controllers/music/media/podcasts.py
 @@ -75,10 +75,12 @@ class PodcastsController(MediaControllerBase[Podcast]):
@@ -410,7 +411,7 @@ index 5773cfeb3..92e7814d7 100644
              limit=limit,
              offset=offset,
 diff --git a/music_assistant/controllers/music/media/tracks.py b/music_assistant/controllers/music/media/tracks.py
-index 17eaea025..0029bee72 100644
+index 17eaea0..0029bee 100644
 --- a/music_assistant/controllers/music/media/tracks.py
 +++ b/music_assistant/controllers/music/media/tracks.py
 @@ -241,6 +241,8 @@ class TracksController(MediaControllerBase[Track]):
@@ -433,10 +434,10 @@ index 17eaea025..0029bee72 100644
              offset=offset,
 diff --git a/tests/controllers/music/test_library_first_letter_jump.py b/tests/controllers/music/test_library_first_letter_jump.py
 new file mode 100644
-index 000000000..5c785c70d
+index 0000000..0c667ae
 --- /dev/null
 +++ b/tests/controllers/music/test_library_first_letter_jump.py
-@@ -0,0 +1,217 @@
+@@ -0,0 +1,226 @@
 +"""
 +Tests for the first-letter jump on library listings.
 +
@@ -606,9 +607,18 @@ index 000000000..5c785c70d
 +    """Whatever letter it is cut at, no item is in both halves and none is in neither."""
 +    for letter in "abcdefghijklmnopqrstuvwxyz":
 +        above = await _names(lettered_mass, starts_from=letter, order_by="sort_name")
-+        below = await _names(lettered_mass, starts_before=letter, order_by="sort_name")
++        # starts_before is asked with the ordering reversed, as a listing walking back up does
++        below = await _names(lettered_mass, starts_before=letter, order_by="sort_name_desc")
 +        assert not set(above) & set(below), letter
 +        assert sorted(above + below) == sorted(SEEDED_ARTISTS), letter
++
++
++async def test_a_random_listing_still_loads(lettered_mass: MusicAssistant) -> None:
++    """A random ordering builds its own subquery, which the letter bound must reach too."""
++    # random has no name column of its own, so the jump files by sort name
++    assert sorted(await _names(lettered_mass, order_by="random")) == sorted(SEEDED_ARTISTS)
++    from_s = await _names(lettered_mass, starts_from="s", order_by="random")
++    assert sorted(from_s) == ["Sigur Rós", "Talk Talk", "Tool"]
 +
 +
 +async def test_an_empty_value_is_no_jump_at_all(lettered_mass: MusicAssistant) -> None:
@@ -655,5 +665,5 @@ index 000000000..5c785c70d
 +        f"{table}_search_sort_name_idx" in detail and "SEARCH" in detail for detail in details
 +    ), details
 -- 
-2.43.0
+2.39.5 (Apple Git-154)
 

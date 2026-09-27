@@ -281,6 +281,14 @@ jobs:
           # nothing. Architecture-independent, so this runs once rather than per-arch.
           python -m pytest tests/providers/pocketcasts -q
 
+      - name: Run the first-letter jump tests
+        working-directory: source
+        run: |
+          set -euo pipefail
+          # patch 0004 carries its own suite; outside the gate, a listing that raised
+          # NameError on random ordering shipped in 2.10.4-upnext.12
+          python -m pytest tests/controllers/music/test_library_first_letter_jump.py -q
+
       - name: Run multichannel and DSD regression tests
         working-directory: source
         run: |
