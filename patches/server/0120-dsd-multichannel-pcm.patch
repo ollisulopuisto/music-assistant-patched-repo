@@ -12,28 +12,6 @@ index 095b897..6caa298 100644
          ConfigValueOption("left"),
          ConfigValueOption("right"),
          ConfigValueOption("mono"),
-diff --git a/music_assistant/controllers/config/players.py b/music_assistant/controllers/config/players.py
-index 5a32916..4273a3b 100644
---- a/music_assistant/controllers/config/players.py
-+++ b/music_assistant/controllers/config/players.py
-@@ -677,9 +677,16 @@ class PlayerConfigMixin:
-             default_entries = []
-         else:
-             # default output/audio related entries
-+            output_channels_entry = deepcopy(CONF_ENTRY_OUTPUT_CHANNELS)
-+            if not is_http_based_player_protocol:
-+                output_channels_entry.options = [
-+                    option
-+                    for option in output_channels_entry.options
-+                    if option.value != "multichannel"
-+                ]
-             default_entries = [
-                 # output channel is always configurable per player(protocol)
--                CONF_ENTRY_OUTPUT_CHANNELS
-+                output_channels_entry
-             ]
-             if is_http_based_player_protocol:
-                 # for http based players we can add the http streaming related entries
 diff --git a/music_assistant/controllers/streams/audio.py b/music_assistant/controllers/streams/audio.py
 index 200fd8f..3e3a1a7 100644
 --- a/music_assistant/controllers/streams/audio.py
