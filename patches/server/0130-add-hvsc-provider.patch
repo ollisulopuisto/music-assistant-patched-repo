@@ -460,10 +460,10 @@ index 0000000..ac1ade5
 +}
 diff --git a/music_assistant/providers/hvsc/provider.py b/music_assistant/providers/hvsc/provider.py
 new file mode 100644
-index 0000000..139e057
+index 0000000..9a4588f
 --- /dev/null
 +++ b/music_assistant/providers/hvsc/provider.py
-@@ -0,0 +1,476 @@
+@@ -0,0 +1,485 @@
 +"""Music Assistant Provider implementation for High Voltage SID Collection (HVSC)."""
 +
 +from __future__ import annotations
@@ -716,7 +716,12 @@ index 0000000..139e057
 +
 +    async def browse(self, path: str) -> Sequence[MediaItemType | ItemMapping | BrowseFolder]:
 +        """Browse HVSC directory structure."""
-+        clean_path = path.strip("/") if path else ""
++        # Music Assistant passes provider browse paths as instance_id://path.
++        # Keep accepting plain paths too, which is useful for direct callers.
++        browse_path = path or ""
++        if "://" in browse_path:
++            _, _, browse_path = browse_path.partition("://")
++        clean_path = browse_path.strip("/")
 +
 +        # Root browsing
 +        if not clean_path:
@@ -724,8 +729,8 @@ index 0000000..139e057
 +            return [
 +                BrowseFolder(
 +                    item_id=f.item_id,
-+                    provider=self.domain,
-+                    path=f.item_id,
++                    provider=self.instance_id,
++                    path=self._browse_uri(f.item_id),
 +                    name=f.name,
 +                )
 +                for f in folders
@@ -751,8 +756,8 @@ index 0000000..139e057
 +            return [
 +                BrowseFolder(
 +                    item_id=f"musicians/{letter}",
-+                    provider=self.domain,
-+                    path=f"musicians/{letter}",
++                    provider=self.instance_id,
++                    path=self._browse_uri(f"musicians/{letter}"),
 +                    name=f"Musicians: {letter}",
 +                )
 +                for letter in letters
@@ -902,10 +907,14 @@ index 0000000..139e057
 +        """Convert Composer model to a navigable BrowseFolder."""
 +        return BrowseFolder(
 +            item_id=f"musician/{composer.item_id}",
-+            provider=self.domain,
-+            path=f"musician/{composer.item_id}",
++            provider=self.instance_id,
++            path=self._browse_uri(f"musician/{composer.item_id}"),
 +            name=composer.name,
 +        )
++
++    def _browse_uri(self, path: str) -> str:
++        """Build a Music Assistant provider browse URI for a relative path."""
++        return f"{self.instance_id}://{path}"
 +
 +    def _tune_to_track(self, tune: Tune, subtune: int = 1) -> Track:
 +        """Convert Tune model to Music Assistant Track."""
