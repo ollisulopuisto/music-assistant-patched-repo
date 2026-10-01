@@ -36,10 +36,10 @@ index 0000000..c24a127
 +    return HvscProvider(mass, manifest, config)
 diff --git a/music_assistant/providers/hvsc/audio_engine.py b/music_assistant/providers/hvsc/audio_engine.py
 new file mode 100644
-index 0000000..a407172
+index 0000000..1010bfd
 --- /dev/null
 +++ b/music_assistant/providers/hvsc/audio_engine.py
-@@ -0,0 +1,141 @@
+@@ -0,0 +1,156 @@
 +"""Audio streaming and emulation engine for HVSC tracks."""
 +
 +from __future__ import annotations
@@ -49,6 +49,7 @@ index 0000000..a407172
 +from collections.abc import AsyncGenerator
 +from contextlib import suppress
 +from pathlib import Path
++from typing import Any
 +
 +import aiohttp
 +
@@ -67,22 +68,36 @@ index 0000000..a407172
 +
 +    def __init__(
 +        self,
-+        base_url: str = DEFAULT_SOASC_BASE_URL,
-+        chip_model: SidChipModel | str = SidChipModel.MOS6581R3,
-+        audio_mode: AudioSourceMode | str = AudioSourceMode.ONLINE,
-+        emulator_binary: str = DEFAULT_EMULATOR_CMD,
-+        local_hvsc_path: str | None = None,
++        base_url: Any = DEFAULT_SOASC_BASE_URL,
++        chip_model: Any = SidChipModel.MOS6581R3,
++        audio_mode: Any = AudioSourceMode.ONLINE,
++        emulator_binary: Any = DEFAULT_EMULATOR_CMD,
++        local_hvsc_path: Any = None,
 +    ) -> None:
++        if hasattr(base_url, "value"):
++            base_url = base_url.value or getattr(base_url, "default_value", DEFAULT_SOASC_BASE_URL)
++        if not isinstance(base_url, str):
++            base_url = str(base_url) if base_url else DEFAULT_SOASC_BASE_URL
 +        self.base_url = base_url.rstrip("/")
++
++        if hasattr(chip_model, "value"):
++            chip_model = chip_model.value or getattr(chip_model, "default_value", SidChipModel.MOS6581R3.value)
 +        if isinstance(chip_model, str):
 +            chip_model = SidChipModel(chip_model)
 +        self.chip_model = chip_model
 +
++        if hasattr(audio_mode, "value"):
++            audio_mode = audio_mode.value or getattr(audio_mode, "default_value", AudioSourceMode.ONLINE.value)
 +        if isinstance(audio_mode, str):
 +            audio_mode = AudioSourceMode(audio_mode)
 +        self.audio_mode = audio_mode
 +
-+        self.emulator_binary = emulator_binary
++        if hasattr(emulator_binary, "value"):
++            emulator_binary = emulator_binary.value or getattr(emulator_binary, "default_value", DEFAULT_EMULATOR_CMD)
++        self.emulator_binary = str(emulator_binary) if emulator_binary else DEFAULT_EMULATOR_CMD
++
++        if hasattr(local_hvsc_path, "value"):
++            local_hvsc_path = local_hvsc_path.value or getattr(local_hvsc_path, "default_value", None)
 +        self.local_hvsc_path = Path(local_hvsc_path) if local_hvsc_path else None
 +
 +    def build_soasc_url(self, hvsc_path: str, subtune: int = 1) -> str:
@@ -445,10 +460,10 @@ index 0000000..ac1ade5
 +}
 diff --git a/music_assistant/providers/hvsc/provider.py b/music_assistant/providers/hvsc/provider.py
 new file mode 100644
-index 0000000..3fcc468
+index 0000000..139e057
 --- /dev/null
 +++ b/music_assistant/providers/hvsc/provider.py
-@@ -0,0 +1,455 @@
+@@ -0,0 +1,476 @@
 +"""Music Assistant Provider implementation for High Voltage SID Collection (HVSC)."""
 +
 +from __future__ import annotations
@@ -547,14 +562,35 @@ index 0000000..3fcc468
 +        self.catalog = HvscCatalog()
 +        self._init_audio_engine()
 +
++    def _get_config_value(self, key: str, default: Any = None) -> Any:
++        """Safely retrieve a configuration value whether config is ProviderConfig or dict."""
++        val = None
++        if hasattr(self.config, "get_value"):
++            try:
++                val = self.config.get_value(key)
++            except (KeyError, AttributeError, TypeError):
++                val = None
++        if val is None:
++            cfg_values = getattr(self.config, "values", {}) or {}
++            raw = cfg_values.get(key)
++            if raw is not None:
++                if hasattr(raw, "value"):
++                    val = raw.value
++                else:
++                    val = raw
++        if val is None:
++            return default
++        if hasattr(val, "value"):
++            val = val.value or getattr(val, "default_value", default)
++        return val if val is not None else default
++
 +    def _init_audio_engine(self) -> None:
 +        """Initialize or update the audio engine using current configuration values."""
-+        cfg_values = getattr(self.config, "values", {}) or {}
-+        base_url = cfg_values.get(CONF_SOASC_URL, DEFAULT_SOASC_BASE_URL)
-+        chip_model = cfg_values.get(CONF_SID_CHIP, SidChipModel.MOS6581R3.value)
-+        audio_mode = cfg_values.get(CONF_AUDIO_SOURCE, AudioSourceMode.ONLINE.value)
-+        emulator_cmd = cfg_values.get(CONF_EMULATOR_CMD, DEFAULT_EMULATOR_CMD)
-+        local_path = cfg_values.get(CONF_LOCAL_HVSC_PATH, None)
++        base_url = self._get_config_value(CONF_SOASC_URL, DEFAULT_SOASC_BASE_URL)
++        chip_model = self._get_config_value(CONF_SID_CHIP, SidChipModel.MOS6581R3.value)
++        audio_mode = self._get_config_value(CONF_AUDIO_SOURCE, AudioSourceMode.ONLINE.value)
++        emulator_cmd = self._get_config_value(CONF_EMULATOR_CMD, DEFAULT_EMULATOR_CMD)
++        local_path = self._get_config_value(CONF_LOCAL_HVSC_PATH, None)
 +
 +        self.audio_engine = AudioEngine(
 +            base_url=base_url,
