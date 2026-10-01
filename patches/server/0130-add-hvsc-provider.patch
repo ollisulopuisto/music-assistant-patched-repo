@@ -1,0 +1,1068 @@
+From: Olli Sulopuisto <1051255+ollisulopuisto@users.noreply.github.com>
+Date: Thu, 1 Oct 2026 15:15:00 +0300
+Subject: [PATCH] Add High Voltage SID Collection (HVSC) music provider
+
+Add native support for Commodore 64 SID chiptunes from the High Voltage
+SID Collection (HVSC). Streams authentic hardware recordings (MOS 6581 R3 /
+MOS 6581 R4 / CSG 8580 R5) from SOASC mirrors, supports optional local
+emulation via sidplayfp, multi-subtune navigation, and catalog browsing
+by composer, classic top 100 tunes, and games.
+---
+diff --git a/music_assistant/providers/hvsc/__init__.py b/music_assistant/providers/hvsc/__init__.py
+new file mode 100644
+index 0000000..c24a127
+--- /dev/null
++++ b/music_assistant/providers/hvsc/__init__.py
+@@ -0,0 +1,20 @@
++"""High Voltage SID Collection (HVSC) music provider for Music Assistant."""
++
++from __future__ import annotations
++
++from typing import TYPE_CHECKING, Any
++
++from .provider import HvscProvider
++
++if TYPE_CHECKING:
++    from music_assistant_models.config_entries import ProviderConfig
++    from music_assistant_models.provider import ProviderManifest
++
++
++async def setup(
++    mass: Any,
++    manifest: ProviderManifest,
++    config: ProviderConfig,
++) -> HvscProvider:
++    """Initialize HVSC provider with given configuration."""
++    return HvscProvider(mass, manifest, config)
+diff --git a/music_assistant/providers/hvsc/audio_engine.py b/music_assistant/providers/hvsc/audio_engine.py
+new file mode 100644
+index 0000000..a407172
+--- /dev/null
++++ b/music_assistant/providers/hvsc/audio_engine.py
+@@ -0,0 +1,141 @@
++"""Audio streaming and emulation engine for HVSC tracks."""
++
++from __future__ import annotations
++
++import asyncio
++import logging
++from collections.abc import AsyncGenerator
++from contextlib import suppress
++from pathlib import Path
++
++import aiohttp
++
++from .constants import (
++    DEFAULT_EMULATOR_CMD,
++    DEFAULT_SOASC_BASE_URL,
++    AudioSourceMode,
++    SidChipModel,
++)
++
++LOGGER = logging.getLogger(__name__)
++
++
++class AudioEngine:
++    """Handles audio stream generation from SOASC HTTP mirrors or local sidplayfp emulator."""
++
++    def __init__(
++        self,
++        base_url: str = DEFAULT_SOASC_BASE_URL,
++        chip_model: SidChipModel | str = SidChipModel.MOS6581R3,
++        audio_mode: AudioSourceMode | str = AudioSourceMode.ONLINE,
++        emulator_binary: str = DEFAULT_EMULATOR_CMD,
++        local_hvsc_path: str | None = None,
++    ) -> None:
++        self.base_url = base_url.rstrip("/")
++        if isinstance(chip_model, str):
++            chip_model = SidChipModel(chip_model)
++        self.chip_model = chip_model
++
++        if isinstance(audio_mode, str):
++            audio_mode = AudioSourceMode(audio_mode)
++        self.audio_mode = audio_mode
++
++        self.emulator_binary = emulator_binary
++        self.local_hvsc_path = Path(local_hvsc_path) if local_hvsc_path else None
++
++    def build_soasc_url(self, hvsc_path: str, subtune: int = 1) -> str:
++        """Construct the direct SOASC MP3 URL for an HVSC track and subtune.
++
++        Naming convention on SOASC:
++        {category}/{subfolder}/{name}_T{subtune:03d}.sid_{chip_model}.mp3
++        Example:
++        MUSICIANS/H/Hubbard_Rob/Action_Biker_T001.sid_MOS6581R3.mp3
++        """
++        clean_path = hvsc_path.lstrip("/")
++        if clean_path.lower().endswith(".sid"):
++            clean_path = clean_path[:-4]
++
++        # Subtune is formatted as 3-digit padded number (e.g. T001, T002)
++        subtune_str = f"T{subtune:03d}"
++        filename = f"{clean_path}_{subtune_str}.sid_{self.chip_model.value}.mp3"
++        return f"{self.base_url}/{filename}"
++
++    def build_emulator_command(
++        self,
++        sid_file_path: str,
++        subtune: int = 1,
++        duration_seconds: int = 180,
++    ) -> list[str]:
++        """Build command line arguments to render SID to 16-bit 44.1kHz stereo WAV on stdout.
++
++        sidplayfp options:
++        -o<tune>: subtune number
++        -t<seconds>: song length in seconds
++        -w-: write WAV file to stdout
++        """
++        return [
++            self.emulator_binary,
++            f"-o{subtune}",
++            f"-t{duration_seconds}",
++            "-w-",
++            sid_file_path,
++        ]
++
++    def resolve_local_sid_path(self, hvsc_path: str) -> Path | None:
++        """Resolve an HVSC relative path against the configured local HVSC directory."""
++        if not self.local_hvsc_path or not self.local_hvsc_path.exists():
++            return None
++        candidate = self.local_hvsc_path / hvsc_path.lstrip("/")
++        if candidate.exists() and candidate.is_file():
++            return candidate
++        return None
++
++    async def stream_http_audio(
++        self,
++        url: str,
++        session: aiohttp.ClientSession | None = None,
++        chunk_size: int = 64 * 1024,
++    ) -> AsyncGenerator[bytes]:
++        """Stream audio bytes asynchronously from an HTTP URL."""
++        close_session = False
++        if session is None:
++            session = aiohttp.ClientSession()
++            close_session = True
++
++        try:
++            async with session.get(url) as response:
++                response.raise_for_status()
++                async for chunk in response.content.iter_chunked(chunk_size):
++                    yield chunk
++        finally:
++            if close_session:
++                await session.close()
++
++    async def stream_emulator_audio(
++        self,
++        sid_file_path: str,
++        subtune: int = 1,
++        duration_seconds: int = 180,
++        chunk_size: int = 64 * 1024,
++    ) -> AsyncGenerator[bytes]:
++        """Run sidplayfp subprocess and yield rendered audio bytes in real-time."""
++        cmd = self.build_emulator_command(sid_file_path, subtune, duration_seconds)
++        LOGGER.debug("Starting emulator rendering: %s", " ".join(cmd))
++        proc = await asyncio.create_subprocess_exec(
++            *cmd,
++            stdout=asyncio.subprocess.PIPE,
++            stderr=asyncio.subprocess.DEVNULL,
++        )
++
++        try:
++            assert proc.stdout is not None
++            while True:
++                data = await proc.stdout.read(chunk_size)
++                if not data:
++                    break
++                yield data
++        finally:
++            if proc.returncode is None:
++                proc.terminate()
++                with suppress(ProcessLookupError):
++                    await proc.wait()
+diff --git a/music_assistant/providers/hvsc/catalog.py b/music_assistant/providers/hvsc/catalog.py
+new file mode 100644
+index 0000000..f0a210c
+--- /dev/null
++++ b/music_assistant/providers/hvsc/catalog.py
+@@ -0,0 +1,194 @@
++"""Built-in High Voltage SID Collection catalog and indexing engine."""
++
++from __future__ import annotations
++
++import logging
++from dataclasses import dataclass, field
++from pathlib import Path
++
++LOGGER = logging.getLogger(__name__)
++
++
++@dataclass
++class Composer:
++    """Commodore 64 musician / composer."""
++
++    item_id: str  # e.g. "Hubbard_Rob"
++    name: str  # e.g. "Rob Hubbard"
++    country: str = ""
++    handle: str = ""
++    hvsc_dir: str = ""  # e.g. "MUSICIANS/H/Hubbard_Rob"
++
++
++@dataclass
++class Tune:
++    """A SID music file / composition."""
++
++    item_id: str  # e.g. "MUSICIANS/H/Hubbard_Rob/Commando.sid"
++    title: str  # e.g. "Commando"
++    composer_id: str  # e.g. "Hubbard_Rob"
++    composer_name: str  # e.g. "Rob Hubbard"
++    subtunes_count: int = 1
++    default_subtune: int = 1
++    year: str = ""
++    publisher: str = ""
++    hvsc_path: str = ""
++    durations: list[int] = field(default_factory=list)
++
++
++@dataclass
++class CatalogBrowseFolder:
++    """Catalog folder representation for browsing."""
++
++    item_id: str
++    name: str
++    description: str = ""
++
++
++# Pre-populated legendary catalog of C64 SID music
++BUILTIN_COMPOSERS: list[Composer] = [
++    Composer("Hubbard_Rob", "Rob Hubbard", "UK", "", "MUSICIANS/H/Hubbard_Rob"),
++    Composer("Galway_Martin", "Martin Galway", "UK/Ireland", "", "MUSICIANS/G/Galway_Martin"),
++    Composer("Tel_Jeroen", "Jeroen Tel", "Netherlands", "WAVE", "MUSICIANS/T/Tel_Jeroen"),
++    Composer("Huelsbeck_Chris", "Chris Hülsbeck", "Germany", "", "MUSICIANS/H/Huelsbeck_Chris"),
++    Composer("Daglish_Ben", "Ben Daglish", "UK", "Benn", "MUSICIANS/D/Daglish_Ben"),
++    Composer("Whittaker_David", "David Whittaker", "UK", "", "MUSICIANS/W/Whittaker_David"),
++    Composer("Follin_Tim", "Tim Follin", "UK", "", "MUSICIANS/F/Follin_Tim"),
++    Composer("Gray_Matt", "Matt Gray", "UK", "", "MUSICIANS/G/Gray_Matt"),
++    Composer("Cooksey_Mark", "Mark Cooksey", "UK", "", "MUSICIANS/C/Cooksey_Mark"),
++    Composer("Ouwehand_Reyn", "Reyn Ouwehand", "Netherlands", "Reyn", "MUSICIANS/O/Ouwehand_Reyn"),
++    Composer("Bjerregaard_Johannes", "Johannes Bjerregaard", "Denmark", "", "MUSICIANS/B/Bjerregaard_Johannes"),
++    Composer("Deenen_Charles", "Charles Deenen", "Netherlands", "", "MUSICIANS/D/Deenen_Charles"),
++    Composer("Brimble_Allister", "Allister Brimble", "UK", "", "MUSICIANS/B/Brimble_Allister"),
++    Composer("Laxity", "Laxity (Thomas Egeskov Petersen)", "Denmark", "Laxity", "MUSICIANS/L/Laxity"),
++    Composer("DRAX", "DRAX (Thomas Mogensen)", "Denmark", "DRAX", "MUSICIANS/D/DRAX"),
++]
++
++BUILTIN_TUNES: list[Tune] = [
++    # Rob Hubbard
++    Tune("MUSICIANS/H/Hubbard_Rob/Commando.sid", "Commando", "Hubbard_Rob", "Rob Hubbard", 3, 1, "1985", "Elite", "MUSICIANS/H/Hubbard_Rob/Commando.sid", [205, 15, 10]),
++    Tune("MUSICIANS/H/Hubbard_Rob/Monty_on_the_Run.sid", "Monty on the Run", "Hubbard_Rob", "Rob Hubbard", 6, 1, "1985", "Gremlin Graphics", "MUSICIANS/H/Hubbard_Rob/Monty_on_the_Run.sid", [346, 17, 10, 10, 10, 10]),
++    Tune("MUSICIANS/H/Hubbard_Rob/Sanxion.sid", "Sanxion", "Hubbard_Rob", "Rob Hubbard", 2, 1, "1986", "Thalamus", "MUSICIANS/H/Hubbard_Rob/Sanxion.sid", [290, 180]),
++    Tune("MUSICIANS/H/Hubbard_Rob/Delta.sid", "Delta", "Hubbard_Rob", "Rob Hubbard", 3, 1, "1987", "Thalamus", "MUSICIANS/H/Hubbard_Rob/Delta.sid", [440, 210, 150]),
++    Tune("MUSICIANS/H/Hubbard_Rob/International_Karate.sid", "International Karate", "Hubbard_Rob", "Rob Hubbard", 1, 1, "1985", "System 3", "MUSICIANS/H/Hubbard_Rob/International_Karate.sid", [340]),
++    Tune("MUSICIANS/H/Hubbard_Rob/Skate_or_Die.sid", "Skate or Die", "Hubbard_Rob", "Rob Hubbard", 4, 1, "1987", "Electronic Arts", "MUSICIANS/H/Hubbard_Rob/Skate_or_Die.sid", [190, 80, 75, 45]),
++    Tune("MUSICIANS/H/Hubbard_Rob/Crazy_Comets.sid", "Crazy Comets", "Hubbard_Rob", "Rob Hubbard", 2, 1, "1985", "Martech", "MUSICIANS/H/Hubbard_Rob/Crazy_Comets.sid", [240, 60]),
++    Tune("MUSICIANS/H/Hubbard_Rob/Action_Biker.sid", "Action Biker", "Hubbard_Rob", "Rob Hubbard", 3, 1, "1985", "Mastertronic", "MUSICIANS/H/Hubbard_Rob/Action_Biker.sid", [175, 58, 11]),
++    Tune("MUSICIANS/H/Hubbard_Rob/Master_of_Magic.sid", "Master of Magic", "Hubbard_Rob", "Rob Hubbard", 1, 1, "1985", "M.A.D.", "MUSICIANS/H/Hubbard_Rob/Master_of_Magic.sid", [330]),
++    Tune("MUSICIANS/H/Hubbard_Rob/Nemesis_the_Warlock.sid", "Nemesis the Warlock", "Hubbard_Rob", "Rob Hubbard", 1, 1, "1987", "Martech", "MUSICIANS/H/Hubbard_Rob/Nemesis_the_Warlock.sid", [315]),
++
++    # Martin Galway
++    Tune("MUSICIANS/G/Galway_Martin/Comic_Bakery.sid", "Comic Bakery", "Galway_Martin", "Martin Galway", 5, 1, "1986", "Imagine", "MUSICIANS/G/Galway_Martin/Comic_Bakery.sid", [192, 60, 45, 30, 20]),
++    Tune("MUSICIANS/G/Galway_Martin/Wizball.sid", "Wizball", "Galway_Martin", "Martin Galway", 7, 1, "1987", "Ocean", "MUSICIANS/G/Galway_Martin/Wizball.sid", [385, 180, 120, 60, 45, 30, 15]),
++    Tune("MUSICIANS/G/Galway_Martin/Rambo_First_Blood_Part_II.sid", "Rambo: First Blood Part II", "Galway_Martin", "Martin Galway", 3, 1, "1985", "Ocean", "MUSICIANS/G/Galway_Martin/Rambo_First_Blood_Part_II.sid", [310, 150, 40]),
++    Tune("MUSICIANS/G/Galway_Martin/Arkanoid.sid", "Arkanoid", "Galway_Martin", "Martin Galway", 3, 1, "1987", "Imagine", "MUSICIANS/G/Galway_Martin/Arkanoid.sid", [185, 30, 15]),
++    Tune("MUSICIANS/G/Galway_Martin/Green_Beret.sid", "Green Beret", "Galway_Martin", "Martin Galway", 6, 1, "1986", "Imagine", "MUSICIANS/G/Galway_Martin/Green_Beret.sid", [200, 180, 160, 40, 20, 10]),
++    Tune("MUSICIANS/G/Galway_Martin/Parallax.sid", "Parallax", "Galway_Martin", "Martin Galway", 2, 1, "1986", "Ocean", "MUSICIANS/G/Galway_Martin/Parallax.sid", [420, 190]),
++    Tune("MUSICIANS/G/Galway_Martin/Miami_Vice.sid", "Miami Vice", "Galway_Martin", "Martin Galway", 1, 1, "1986", "Ocean", "MUSICIANS/G/Galway_Martin/Miami_Vice.sid", [280]),
++
++    # Jeroen Tel (Maniacs of Noise)
++    Tune("MUSICIANS/T/Tel_Jeroen/Cybernoid.sid", "Cybernoid", "Tel_Jeroen", "Jeroen Tel", 3, 1, "1988", "Hewson", "MUSICIANS/T/Tel_Jeroen/Cybernoid.sid", [285, 60, 30]),
++    Tune("MUSICIANS/T/Tel_Jeroen/Cybernoid_II.sid", "Cybernoid II", "Tel_Jeroen", "Jeroen Tel", 3, 1, "1988", "Hewson", "MUSICIANS/T/Tel_Jeroen/Cybernoid_II.sid", [310, 75, 40]),
++    Tune("MUSICIANS/T/Tel_Jeroen/Myth.sid", "Myth: History in the Making", "Tel_Jeroen", "Jeroen Tel", 4, 1, "1989", "System 3", "MUSICIANS/T/Tel_Jeroen/Myth.sid", [345, 120, 80, 45]),
++    Tune("MUSICIANS/T/Tel_Jeroen/Turbo_Outrun.sid", "Turbo Outrun", "Tel_Jeroen", "Jeroen Tel", 6, 1, "1989", "Sega/US Gold", "MUSICIANS/T/Tel_Jeroen/Turbo_Outrun.sid", [290, 260, 240, 180, 60, 30]),
++    Tune("MUSICIANS/T/Tel_Jeroen/Supremacy.sid", "Supremacy", "Tel_Jeroen", "Jeroen Tel", 3, 1, "1990", "Virgin", "MUSICIANS/T/Tel_Jeroen/Supremacy.sid", [320, 110, 45]),
++    Tune("MUSICIANS/T/Tel_Jeroen/Hawkeye.sid", "Hawkeye", "Tel_Jeroen", "Jeroen Tel", 3, 1, "1988", "Thalamus", "MUSICIANS/T/Tel_Jeroen/Hawkeye.sid", [270, 90, 50]),
++    Tune("MUSICIANS/T/Tel_Jeroen/Eliminator.sid", "Eliminator", "Tel_Jeroen", "Jeroen Tel", 2, 1, "1988", "Hewson", "MUSICIANS/T/Tel_Jeroen/Eliminator.sid", [240, 60]),
++
++    # Chris Hülsbeck
++    Tune("MUSICIANS/H/Huelsbeck_Chris/Great_Giana_Sisters.sid", "The Great Giana Sisters", "Huelsbeck_Chris", "Chris Hülsbeck", 8, 1, "1987", "Rainbow Arts", "MUSICIANS/H/Huelsbeck_Chris/Great_Giana_Sisters.sid", [270, 240, 210, 180, 90, 60, 30, 15]),
++    Tune("MUSICIANS/H/Huelsbeck_Chris/Turrican.sid", "Turrican", "Huelsbeck_Chris", "Chris Hülsbeck", 11, 1, "1990", "Rainbow Arts", "MUSICIANS/H/Huelsbeck_Chris/Turrican.sid", [310, 260, 240, 210, 190, 180, 150, 120, 90, 45, 20]),
++    Tune("MUSICIANS/H/Huelsbeck_Chris/Turrican_II.sid", "Turrican II: The Final Fight", "Huelsbeck_Chris", "Chris Hülsbeck", 12, 1, "1991", "Rainbow Arts", "MUSICIANS/H/Huelsbeck_Chris/Turrican_II.sid", [350, 300, 280, 240, 220, 200, 180, 150, 120, 90, 60, 30]),
++    Tune("MUSICIANS/H/Huelsbeck_Chris/Katakis.sid", "Katakis", "Huelsbeck_Chris", "Chris Hülsbeck", 14, 1, "1988", "Rainbow Arts", "MUSICIANS/H/Huelsbeck_Chris/Katakis.sid", [260, 220, 210, 190, 180, 160, 150, 140, 120, 90, 60, 45, 30, 15]),
++    Tune("MUSICIANS/H/Huelsbeck_Chris/R-Type.sid", "R-Type", "Huelsbeck_Chris", "Chris Hülsbeck", 4, 1, "1988", "Rainbow Arts", "MUSICIANS/H/Huelsbeck_Chris/R-Type.sid", [230, 180, 140, 30]),
++
++    # Ben Daglish
++    Tune("MUSICIANS/D/Daglish_Ben/Last_Ninja.sid", "The Last Ninja (Wastelands)", "Daglish_Ben", "Ben Daglish", 11, 1, "1987", "System 3", "MUSICIANS/D/Daglish_Ben/Last_Ninja.sid", [320, 290, 250, 210, 180, 150, 120, 90, 60, 30, 20]),
++    Tune("MUSICIANS/D/Daglish_Ben/Trap.sid", "Trap", "Daglish_Ben", "Ben Daglish", 3, 1, "1986", "Alligata", "MUSICIANS/D/Daglish_Ben/Trap.sid", [280, 150, 60]),
++    Tune("MUSICIANS/D/Daglish_Ben/Deflektor.sid", "Deflektor", "Daglish_Ben", "Ben Daglish", 2, 1, "1987", "Gremlin Graphics", "MUSICIANS/D/Daglish_Ben/Deflektor.sid", [310, 90]),
++    Tune("MUSICIANS/D/Daglish_Ben/Wilderness.sid", "The Wilderness (Last Ninja)", "Daglish_Ben", "Ben Daglish", 2, 1, "1987", "System 3", "MUSICIANS/D/Daglish_Ben/Wilderness.sid", [340, 120]),
++
++    # David Whittaker
++    Tune("MUSICIANS/W/Whittaker_David/Glider_Rider.sid", "Glider Rider", "Whittaker_David", "David Whittaker", 2, 1, "1986", "Quicksilva", "MUSICIANS/W/Whittaker_David/Glider_Rider.sid", [380, 90]),
++    Tune("MUSICIANS/W/Whittaker_David/Speedball.sid", "Speedball", "Whittaker_David", "David Whittaker", 3, 1, "1988", "Image Works", "MUSICIANS/W/Whittaker_David/Speedball.sid", [250, 120, 45]),
++    Tune("MUSICIANS/W/Whittaker_David/Armageddon_Man.sid", "The Armageddon Man", "Whittaker_David", "David Whittaker", 1, 1, "1987", "Martech", "MUSICIANS/W/Whittaker_David/Armageddon_Man.sid", [410]),
++    Tune("MUSICIANS/W/Whittaker_David/Lazy_Jones.sid", "Lazy Jones", "Whittaker_David", "David Whittaker", 21, 1, "1984", "Terminal", "MUSICIANS/W/Whittaker_David/Lazy_Jones.sid", [180, 30, 25, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20]),
++
++    # Tim Follin
++    Tune("MUSICIANS/F/Follin_Tim/Ghouls_n_Ghosts.sid", "Ghouls 'n Ghosts", "Follin_Tim", "Tim Follin", 7, 1, "1989", "US Gold/Capcom", "MUSICIANS/F/Follin_Tim/Ghouls_n_Ghosts.sid", [360, 280, 240, 190, 120, 60, 30]),
++    Tune("MUSICIANS/F/Follin_Tim/Bionic_Commando.sid", "Bionic Commando", "Follin_Tim", "Tim Follin", 5, 1, "1988", "Go!", "MUSICIANS/F/Follin_Tim/Bionic_Commando.sid", [320, 210, 180, 90, 30]),
++    Tune("MUSICIANS/F/Follin_Tim/LED_Storm.sid", "LED Storm", "Follin_Tim", "Tim Follin", 6, 1, "1989", "Go!", "MUSICIANS/F/Follin_Tim/LED_Storm.sid", [340, 260, 190, 150, 80, 30]),
++
++    # Matt Gray
++    Tune("MUSICIANS/G/Gray_Matt/Last_Ninja_2.sid", "Last Ninja 2: Central Park", "Gray_Matt", "Matt Gray", 12, 1, "1988", "System 3", "MUSICIANS/G/Gray_Matt/Last_Ninja_2.sid", [370, 330, 310, 290, 270, 250, 220, 180, 150, 120, 90, 45]),
++    Tune("MUSICIANS/G/Gray_Matt/Dominator.sid", "Dominator", "Gray_Matt", "Matt Gray", 3, 1, "1989", "System 3", "MUSICIANS/G/Gray_Matt/Dominator.sid", [320, 180, 60]),
++
++    # Mark Cooksey
++    Tune("MUSICIANS/C/Cooksey_Mark/Ghosts_n_Goblins.sid", "Ghosts 'n Goblins", "Cooksey_Mark", "Mark Cooksey", 4, 1, "1986", "Elite", "MUSICIANS/C/Cooksey_Mark/Ghosts_n_Goblins.sid", [280, 120, 60, 20]),
++    Tune("MUSICIANS/C/Cooksey_Mark/Paperboy.sid", "Paperboy", "Cooksey_Mark", "Mark Cooksey", 3, 1, "1986", "Elite", "MUSICIANS/C/Cooksey_Mark/Paperboy.sid", [220, 90, 30]),
++    Tune("MUSICIANS/C/Cooksey_Mark/Bomb_Jack.sid", "Bomb Jack", "Cooksey_Mark", "Mark Cooksey", 5, 1, "1986", "Elite", "MUSICIANS/C/Cooksey_Mark/Bomb_Jack.sid", [190, 150, 120, 60, 20]),
++
++    # Reyn Ouwehand
++    Tune("MUSICIANS/O/Ouwehand_Reyn/Flimbos_Quest.sid", "Flimbo's Quest", "Ouwehand_Reyn", "Reyn Ouwehand", 6, 1, "1990", "System 3", "MUSICIANS/O/Ouwehand_Reyn/Flimbos_Quest.sid", [330, 290, 250, 180, 90, 45]),
++    Tune("MUSICIANS/O/Ouwehand_Reyn/Last_Ninja_3.sid", "Last Ninja 3", "Ouwehand_Reyn", "Reyn Ouwehand", 8, 1, "1991", "System 3", "MUSICIANS/O/Ouwehand_Reyn/Last_Ninja_3.sid", [360, 310, 280, 240, 190, 150, 90, 40]),
++]
++
++
++class HvscCatalog:
++    """Provides categorized access and fast search to HVSC music metadata."""
++
++    def __init__(self, local_hvsc_path: str | Path | None = None) -> None:
++        self.composers: dict[str, Composer] = {c.item_id: c for c in BUILTIN_COMPOSERS}
++        self.tunes: dict[str, Tune] = {t.item_id: t for t in BUILTIN_TUNES}
++        self.local_hvsc_path = Path(local_hvsc_path) if local_hvsc_path else None
++
++    def get_featured_composers(self) -> list[Composer]:
++        """Return list of featured legendary C64 composers."""
++        return list(self.composers.values())
++
++    def get_top_tunes(self) -> list[Tune]:
++        """Return collection of classic and legendary SID tunes."""
++        return list(self.tunes.values())
++
++    def get_composer(self, composer_id: str) -> Composer | None:
++        """Find composer by identifier."""
++        return self.composers.get(composer_id)
++
++    def get_tune(self, tune_id: str) -> Tune | None:
++        """Find tune by item ID."""
++        clean_id = tune_id.split("#")[0]
++        return self.tunes.get(clean_id)
++
++    def get_tunes_by_composer(self, composer_id: str) -> list[Tune]:
++        """Return all tunes composed by a specific musician."""
++        return [t for t in self.tunes.values() if t.composer_id == composer_id]
++
++    def browse_root(self) -> list[CatalogBrowseFolder]:
++        """Return top-level categories for Music Assistant browser."""
++        return [
++            CatalogBrowseFolder("featured", "🌟 Featured Composers", "Legendary SID composers (Rob Hubbard, Martin Galway, Chris Hülsbeck, Jeroen Tel, ...)"),
++            CatalogBrowseFolder("top100", "🏆 Top Legendary SID Tunes", "The most iconic Commodore 64 game and demo tunes of all time"),
++            CatalogBrowseFolder("musicians", "👨‍🎤 Musicians A-Z", "Browse composers by alphabetical letter"),
++            CatalogBrowseFolder("games", "🎮 Games Soundtracks", "Commodore 64 game music collection"),
++        ]
++
++    def browse_musicians_letter(self, letter: str) -> list[Composer]:
++        """Return all composers whose surname/folder starts with the given letter."""
++        let = letter.upper()
++        return [c for c in self.composers.values() if c.item_id.upper().startswith(let)]
++
++    def search(self, query: str) -> dict[str, list[Composer | Tune]]:
++        """Search composers and tune titles matching the query string."""
++        q = query.lower().strip()
++        matched_artists = [
++            c for c in self.composers.values()
++            if q in c.name.lower() or q in c.item_id.lower() or (c.handle and q in c.handle.lower())
++        ]
++        matched_tracks = [
++            t for t in self.tunes.values()
++            if q in t.title.lower() or q in t.composer_name.lower() or q in t.publisher.lower()
++        ]
++        return {
++            "artists": matched_artists,
++            "tracks": matched_tracks,
++        }
+diff --git a/music_assistant/providers/hvsc/constants.py b/music_assistant/providers/hvsc/constants.py
+new file mode 100644
+index 0000000..15b015f
+--- /dev/null
++++ b/music_assistant/providers/hvsc/constants.py
+@@ -0,0 +1,38 @@
++"""Constants for the High Voltage SID Collection (HVSC) provider."""
++
++from __future__ import annotations
++
++from enum import Enum
++
++DOMAIN = "hvsc"
++PROVIDER_NAME = "High Voltage SID Collection"
++PROVIDER_VERSION = "1.0.0"
++
++# Configuration Keys
++CONF_AUDIO_SOURCE = "audio_source"
++CONF_SID_CHIP = "sid_chip"
++CONF_SOASC_URL = "soasc_url"
++CONF_LOCAL_HVSC_PATH = "local_hvsc_path"
++CONF_EMULATOR_CMD = "emulator_cmd"
++CONF_DEFAULT_DURATION = "default_duration"
++
++# Defaults
++DEFAULT_SOASC_BASE_URL = "https://mirror.accum.se/mirror/media/Oakvalley/soasc/hvsc/049/MP3"
++DEFAULT_DURATION_SECONDS = 180
++DEFAULT_EMULATOR_CMD = "sidplayfp"
++
++
++class SidChipModel(str, Enum):
++    """Commodore 64 Sound Interface Device chip model."""
++
++    MOS6581R3 = "MOS6581R3"  # Gritty, warm, early C64 analog filter
++    MOS6581R4 = "MOS6581R4"  # Later 6581 revision
++    CSG8580R5 = "CSG8580R5"  # Clean, sharp C64C / C64-II filter
++
++
++class AudioSourceMode(str, Enum):
++    """Audio source playback mode."""
++
++    ONLINE = "online"  # Stream authentic C64 hardware recordings from SOASC
++    LOCAL_EMULATOR = "local_emulator"  # Render local .sid files via sidplayfp/vsid
++    AUTO = "auto"  # Use local files & emulator if found, else fall back to online streaming
+diff --git a/music_assistant/providers/hvsc/manifest.json b/music_assistant/providers/hvsc/manifest.json
+new file mode 100644
+index 0000000..ac1ade5
+--- /dev/null
++++ b/music_assistant/providers/hvsc/manifest.json
+@@ -0,0 +1,12 @@
++{
++  "type": "music",
++  "domain": "hvsc",
++  "stage": "stable",
++  "name": "High Voltage SID Collection (HVSC)",
++  "description": "Stream Commodore 64 SID music from the legendary High Voltage SID Collection.",
++  "codeowners": ["@ollisulopuisto"],
++  "requirements": [],
++  "documentation": "https://github.com/ollisulopuisto/hvsc-ma",
++  "multi_instance": false,
++  "icon": "chip"
++}
+diff --git a/music_assistant/providers/hvsc/provider.py b/music_assistant/providers/hvsc/provider.py
+new file mode 100644
+index 0000000..3fcc468
+--- /dev/null
++++ b/music_assistant/providers/hvsc/provider.py
+@@ -0,0 +1,455 @@
++"""Music Assistant Provider implementation for High Voltage SID Collection (HVSC)."""
++
++from __future__ import annotations
++
++import logging
++from collections.abc import AsyncGenerator, Sequence
++from typing import TYPE_CHECKING, Any
++
++from music_assistant_models.config_entries import (
++    ConfigEntry,
++    ConfigValueOption,
++    ConfigValueType,
++)
++from music_assistant_models.enums import (
++    ConfigEntryType,
++    ContentType,
++    MediaType,
++    ProviderFeature,
++    StreamType,
++)
++from music_assistant_models.errors import MediaNotFoundError
++from music_assistant_models.media_items import (
++    Artist,
++    AudioFormat,
++    BrowseFolder,
++    ItemMapping,
++    MediaItemType,
++    ProviderMapping,
++    SearchResults,
++    Track,
++    UniqueList,
++)
++from music_assistant_models.streamdetails import StreamDetails
++
++from .audio_engine import AudioEngine, AudioSourceMode, SidChipModel
++from .catalog import Composer, HvscCatalog, Tune
++from .constants import (
++    CONF_AUDIO_SOURCE,
++    CONF_DEFAULT_DURATION,
++    CONF_EMULATOR_CMD,
++    CONF_LOCAL_HVSC_PATH,
++    CONF_SID_CHIP,
++    CONF_SOASC_URL,
++    DEFAULT_DURATION_SECONDS,
++    DEFAULT_EMULATOR_CMD,
++    DEFAULT_SOASC_BASE_URL,
++)
++
++if TYPE_CHECKING:
++    from music_assistant_models.config_entries import ProviderConfig
++    from music_assistant_models.provider import ProviderManifest
++
++LOGGER = logging.getLogger(__name__)
++
++SUPPORTED_FEATURES = {
++    ProviderFeature.BROWSE,
++    ProviderFeature.SEARCH,
++    ProviderFeature.SIMILAR_TRACKS,
++}
++
++# Dynamic base class: inherit from real MusicProvider if inside Music Assistant,
++# else provide a standalone shim for unit testing and independent usage.
++try:
++    from music_assistant.models.music_provider import MusicProvider
++except ImportError:
++
++    class MusicProvider:  # type: ignore[no-redef]
++        """Shim for MusicProvider when running outside Music Assistant server."""
++
++        def __init__(
++            self,
++            mass: Any,
++            manifest: ProviderManifest,
++            config: ProviderConfig,
++            supported_features: set[ProviderFeature] | None = None,
++        ) -> None:
++            self.mass = mass
++            self.manifest = manifest
++            self.config = config
++            self.supported_features = supported_features or SUPPORTED_FEATURES
++            self.domain = manifest.domain
++            self.instance_id = config.instance_id
++
++
++class HvscProvider(MusicProvider):
++    """High Voltage SID Collection Music Provider for Music Assistant."""
++
++    def __init__(
++        self,
++        mass: Any,
++        manifest: ProviderManifest,
++        config: ProviderConfig,
++        supported_features: set[ProviderFeature] | None = None,
++    ) -> None:
++        super().__init__(mass, manifest, config, supported_features or SUPPORTED_FEATURES)
++        self.catalog = HvscCatalog()
++        self._init_audio_engine()
++
++    def _init_audio_engine(self) -> None:
++        """Initialize or update the audio engine using current configuration values."""
++        cfg_values = getattr(self.config, "values", {}) or {}
++        base_url = cfg_values.get(CONF_SOASC_URL, DEFAULT_SOASC_BASE_URL)
++        chip_model = cfg_values.get(CONF_SID_CHIP, SidChipModel.MOS6581R3.value)
++        audio_mode = cfg_values.get(CONF_AUDIO_SOURCE, AudioSourceMode.ONLINE.value)
++        emulator_cmd = cfg_values.get(CONF_EMULATOR_CMD, DEFAULT_EMULATOR_CMD)
++        local_path = cfg_values.get(CONF_LOCAL_HVSC_PATH, None)
++
++        self.audio_engine = AudioEngine(
++            base_url=base_url,
++            chip_model=chip_model,
++            audio_mode=audio_mode,
++            emulator_binary=emulator_cmd,
++            local_hvsc_path=local_path,
++        )
++
++    async def get_config_entries(
++        self,
++        action: str | None = None,
++        values: dict[str, ConfigValueType] | None = None,
++    ) -> tuple[ConfigEntry, ...]:
++        """Return configuration entries exposed to the Music Assistant settings UI."""
++        return (
++            ConfigEntry(
++                key=CONF_AUDIO_SOURCE,
++                type=ConfigEntryType.STRING,
++                label="Audio Playback Source",
++                default_value=AudioSourceMode.ONLINE.value,
++                options=[
++                    ConfigValueOption(
++                        AudioSourceMode.ONLINE.value,
++                        "Online Stream (Authentic C64 hardware recordings from SOASC)",
++                    ),
++                    ConfigValueOption(
++                        AudioSourceMode.LOCAL_EMULATOR.value,
++                        "Local Emulator (Render local .sid files via sidplayfp)",
++                    ),
++                    ConfigValueOption(
++                        AudioSourceMode.AUTO.value,
++                        "Auto (Use local emulator if present, fallback to online stream)",
++                    ),
++                ],
++                description="Select whether to stream pre-recorded authentic hardware audio or emulate locally.",
++            ),
++            ConfigEntry(
++                key=CONF_SID_CHIP,
++                type=ConfigEntryType.STRING,
++                label="Preferred SID Chip Model",
++                default_value=SidChipModel.MOS6581R3.value,
++                options=[
++                    ConfigValueOption(
++                        SidChipModel.MOS6581R3.value,
++                        "MOS 6581 R3 (Classic gritty 'breadbin' analog filter)",
++                    ),
++                    ConfigValueOption(
++                        SidChipModel.MOS6581R4.value,
++                        "MOS 6581 R4 (Later 6581 revision)",
++                    ),
++                    ConfigValueOption(
++                        SidChipModel.CSG8580R5.value,
++                        "CSG 8580 R5 (Clean, sharp C64C filter)",
++                    ),
++                ],
++                description="Choose the Commodore 64 SID chip revision for playback.",
++            ),
++
++            ConfigEntry(
++                key=CONF_SOASC_URL,
++                type=ConfigEntryType.STRING,
++                label="SOASC Mirror Base URL",
++                default_value=DEFAULT_SOASC_BASE_URL,
++                description="Base HTTP URL for Stone Oakvalley's Authentic SID Collection mirror.",
++                advanced=True,
++            ),
++            ConfigEntry(
++                key=CONF_LOCAL_HVSC_PATH,
++                type=ConfigEntryType.STRING,
++                label="Local HVSC Path",
++                default_value="",
++                description="Optional path to local C64Music directory (for local file playback).",
++                advanced=True,
++            ),
++            ConfigEntry(
++                key=CONF_EMULATOR_CMD,
++                type=ConfigEntryType.STRING,
++                label="Emulator Executable Command",
++                default_value=DEFAULT_EMULATOR_CMD,
++                description="Binary path or command for SID emulator (e.g. sidplayfp).",
++                advanced=True,
++            ),
++            ConfigEntry(
++                key=CONF_DEFAULT_DURATION,
++                type=ConfigEntryType.INTEGER,
++                label="Default Track Duration (seconds)",
++                default_value=DEFAULT_DURATION_SECONDS,
++                description="Fallback duration in seconds for subtunes when song length is not specified.",
++                advanced=True,
++            ),
++        )
++
++    async def handle_async_init(self) -> None:
++        """Handle asynchronous initialization when loaded into Music Assistant."""
++        self._init_audio_engine()
++        LOGGER.info("High Voltage SID Collection provider initialized successfully.")
++
++    async def search(
++        self,
++        search_query: str,
++        media_types: list[MediaType],
++        limit: int = 10,
++    ) -> SearchResults:
++        """Search HVSC for composers and tracks matching the search query."""
++        results = self.catalog.search(search_query)
++        artists: list[Artist] = []
++        tracks: list[Track] = []
++
++        if MediaType.ARTIST in media_types:
++            for composer in results["artists"][:limit]:
++                artists.append(self._composer_to_artist(composer))
++
++        if MediaType.TRACK in media_types:
++            for tune in results["tracks"][:limit]:
++                # Add default subtune as track
++                tracks.append(self._tune_to_track(tune, subtune=tune.default_subtune))
++
++        return SearchResults(
++            artists=artists,
++            tracks=tracks,
++        )
++
++    async def browse(self, path: str) -> Sequence[MediaItemType | ItemMapping | BrowseFolder]:
++        """Browse HVSC directory structure."""
++        clean_path = path.strip("/") if path else ""
++
++        # Root browsing
++        if not clean_path:
++            folders = self.catalog.browse_root()
++            return [
++                BrowseFolder(
++                    item_id=f.item_id,
++                    provider=self.domain,
++                    path=f.item_id,
++                    name=f.name,
++                )
++                for f in folders
++            ]
++
++        # Top 100 / Classic tunes
++        if clean_path == "top100":
++            return [
++                self._tune_to_track(tune, subtune=tune.default_subtune)
++                for tune in self.catalog.get_top_tunes()
++            ]
++
++        # Featured composers
++        if clean_path == "featured":
++            return [
++                self._composer_to_browse_folder(composer)
++                for composer in self.catalog.get_featured_composers()
++            ]
++
++        # Musicians A-Z root
++        if clean_path == "musicians":
++            letters = [chr(c) for c in range(ord("A"), ord("Z") + 1)]
++            return [
++                BrowseFolder(
++                    item_id=f"musicians/{letter}",
++                    provider=self.domain,
++                    path=f"musicians/{letter}",
++                    name=f"Musicians: {letter}",
++                )
++                for letter in letters
++            ]
++
++        # Musicians letter (e.g. "musicians/H")
++        if clean_path.startswith("musicians/"):
++            letter = clean_path.split("/")[-1]
++            composers = self.catalog.browse_musicians_letter(letter)
++            return [self._composer_to_browse_folder(c) for c in composers]
++
++        # Composer folder (e.g. "musician/Hubbard_Rob")
++        if clean_path.startswith("musician/"):
++            composer_id = clean_path.split("/", 1)[1]
++            tunes = self.catalog.get_tunes_by_composer(composer_id)
++            track_items: list[Track] = []
++            for tune in tunes:
++                for subtune in range(1, tune.subtunes_count + 1):
++                    track_items.append(self._tune_to_track(tune, subtune=subtune))
++            return track_items
++
++        # Games category
++        if clean_path == "games":
++            return [
++                self._tune_to_track(tune, subtune=tune.default_subtune)
++                for tune in self.catalog.get_top_tunes()
++            ]
++
++        return []
++
++    async def get_artist(self, prov_artist_id: str) -> Artist:
++        """Get composer artist details."""
++        composer = self.catalog.get_composer(prov_artist_id)
++        if not composer:
++            msg = f"Composer {prov_artist_id} not found"
++            raise MediaNotFoundError(msg)
++        return self._composer_to_artist(composer)
++
++    async def get_artist_tracks(self, prov_artist_id: str) -> list[Track]:
++        """Get all tracks composed by this artist."""
++        tunes = self.catalog.get_tunes_by_composer(prov_artist_id)
++        tracks: list[Track] = []
++        for tune in tunes:
++            for s in range(1, tune.subtunes_count + 1):
++                tracks.append(self._tune_to_track(tune, subtune=s))
++        return tracks
++
++    async def get_track(self, prov_track_id: str) -> Track:
++        """Get track metadata from item ID."""
++        # Item ID format: <hvsc_path>#<subtune>
++        parts = prov_track_id.split("#")
++        tune_id = parts[0]
++        subtune = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 1
++
++        tune = self.catalog.get_tune(tune_id)
++        if not tune:
++            msg = f"Track {prov_track_id} not found"
++            raise MediaNotFoundError(msg)
++        return self._tune_to_track(tune, subtune=subtune)
++
++    async def get_stream_details(self, item_id: str, media_type: MediaType) -> StreamDetails:
++        """Resolve stream details for a SID track."""
++        parts = item_id.split("#")
++        tune_id = parts[0]
++        subtune = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 1
++
++        tune = self.catalog.get_tune(tune_id)
++        duration = DEFAULT_DURATION_SECONDS
++        if tune and tune.durations and subtune <= len(tune.durations):
++            duration = tune.durations[subtune - 1]
++
++        # Check if local emulator playback is enabled and file exists
++        local_file = self.audio_engine.resolve_local_sid_path(tune_id)
++        if (
++            self.audio_engine.audio_mode in (AudioSourceMode.LOCAL_EMULATOR, AudioSourceMode.AUTO)
++            and local_file is not None
++        ):
++            return StreamDetails(
++                provider=self.domain,
++                item_id=item_id,
++                audio_format=AudioFormat(
++                    content_type=ContentType.WAV,
++                    sample_rate=44100,
++                    bit_depth=16,
++                    channels=2,
++                ),
++                media_type=MediaType.TRACK,
++                stream_type=StreamType.CUSTOM,
++                duration=duration,
++                path=str(local_file),
++            )
++
++        # Online SOASC stream (high quality authentic hardware MP3 recording)
++        stream_url = self.audio_engine.build_soasc_url(tune_id, subtune=subtune)
++        return StreamDetails(
++            provider=self.domain,
++            item_id=item_id,
++            audio_format=AudioFormat(
++                content_type=ContentType.MP3,
++                sample_rate=44100,
++                bit_rate=256,
++                channels=2,
++            ),
++            media_type=MediaType.TRACK,
++            stream_type=StreamType.HTTP,
++            duration=duration,
++            path=stream_url,
++        )
++
++    async def get_audio_stream(
++        self,
++        streamdetails: StreamDetails,
++        seek_position: int = 0,
++    ) -> AsyncGenerator[bytes]:
++        """Stream audio bytes when stream_type is StreamType.CUSTOM."""
++        # Check if local emulator file path is set
++        if streamdetails.path and streamdetails.audio_format.content_type == ContentType.WAV:
++            parts = streamdetails.item_id.split("#")
++            subtune = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 1
++            duration = streamdetails.duration or DEFAULT_DURATION_SECONDS
++            async for chunk in self.audio_engine.stream_emulator_audio(
++                sid_file_path=streamdetails.path,
++                subtune=subtune,
++                duration_seconds=duration,
++            ):
++                yield chunk
++        elif streamdetails.path and streamdetails.path.startswith("http"):
++            async for chunk in self.audio_engine.stream_http_audio(streamdetails.path):
++                yield chunk
++
++    def _composer_to_artist(self, composer: Composer) -> Artist:
++        """Convert Composer model to Music Assistant Artist."""
++        return Artist(
++            item_id=composer.item_id,
++            provider=self.domain,
++            name=composer.name,
++            provider_mappings={
++                ProviderMapping(
++                    item_id=composer.item_id,
++                    provider_domain=self.domain,
++                    provider_instance=self.instance_id,
++                )
++            },
++        )
++
++    def _composer_to_browse_folder(self, composer: Composer) -> BrowseFolder:
++        """Convert Composer model to a navigable BrowseFolder."""
++        return BrowseFolder(
++            item_id=f"musician/{composer.item_id}",
++            provider=self.domain,
++            path=f"musician/{composer.item_id}",
++            name=composer.name,
++        )
++
++    def _tune_to_track(self, tune: Tune, subtune: int = 1) -> Track:
++        """Convert Tune model to Music Assistant Track."""
++        track_id = f"{tune.item_id}#{subtune}"
++        title = tune.title
++        if tune.subtunes_count > 1:
++            title = f"{tune.title} (Subtune {subtune})"
++
++        duration = DEFAULT_DURATION_SECONDS
++        if tune.durations and subtune <= len(tune.durations):
++            duration = tune.durations[subtune - 1]
++
++        artist = ItemMapping(
++            item_id=tune.composer_id,
++            provider=self.domain,
++            name=tune.composer_name,
++            media_type=MediaType.ARTIST,
++        )
++
++        return Track(
++            item_id=track_id,
++            provider=self.domain,
++            name=title,
++            duration=duration,
++            artists=UniqueList([artist]),
++            track_number=subtune,
++            provider_mappings={
++                ProviderMapping(
++                    item_id=track_id,
++                    provider_domain=self.domain,
++                    provider_instance=self.instance_id,
++                )
++            },
++        )
+diff --git a/music_assistant/providers/hvsc/sid_parser.py b/music_assistant/providers/hvsc/sid_parser.py
+new file mode 100644
+index 0000000..ebe8438
+--- /dev/null
++++ b/music_assistant/providers/hvsc/sid_parser.py
+@@ -0,0 +1,156 @@
++"""SID file binary header parser and HVSC Songlengths database parser."""
++
++from __future__ import annotations
++
++import struct
++from dataclasses import dataclass
++
++from .constants import DEFAULT_DURATION_SECONDS
++
++
++@dataclass
++class SidHeader:
++    """Parsed Commodore 64 SID file header information."""
++
++    magic: str
++    version: int
++    data_offset: int
++    load_address: int
++    init_address: int
++    play_address: int
++    songs: int
++    start_song: int
++    speed: int
++    title: str
++    author: str
++    released: str
++    flags: int = 0
++    sid_model: str = "MOS6581"
++    clock: str = "PAL"
++
++
++def _clean_str(raw: bytes) -> str:
++    """Decode raw bytes using ISO-8859-1 and strip null terminators / whitespace."""
++    null_idx = raw.find(b"\x00")
++    if null_idx != -1:
++        raw = raw[:null_idx]
++    return raw.decode("iso-8859-1", errors="replace").strip()
++
++
++def parse_sid_header(data: bytes) -> SidHeader:
++    """Parse PSID or RSID binary header from raw file bytes.
++
++    Specification:
++    Bytes 0-3: Magic ID ('PSID' or 'RSID')
++    Bytes 4-5: Version (0x0001 - 0x0004)
++    Bytes 6-7: Data offset (0x0076 for v1, 0x007C for v2+)
++    Bytes 8-9: Load address
++    Bytes 10-11: Init address
++    Bytes 12-13: Play address
++    Bytes 14-15: Songs count (subtunes)
++    Bytes 16-17: Start song (1-indexed default subtune)
++    Bytes 18-21: Speed flags (32-bit big endian)
++    Bytes 22-53: Name / Title (32 bytes)
++    Bytes 54-85: Author / Composer (32 bytes)
++    Bytes 86-117: Released / Copyright (32 bytes)
++    Bytes 118-119: Flags (v2+)
++    """
++    if len(data) < 0x0076:
++        msg = f"Data too short for SID header ({len(data)} bytes, minimum 118 bytes)"
++        raise ValueError(msg)
++
++    magic = data[0:4]
++    if magic not in (b"PSID", b"RSID"):
++        msg = f"Invalid SID magic identifier: {magic!r}, expected PSID or RSID"
++        raise ValueError(msg)
++
++    version, data_offset, load_addr, init_addr, play_addr, songs, start_song, speed = (
++        struct.unpack_from(">HHHHHHHI", data, 4)
++    )
++
++    title = _clean_str(data[22:54])
++    author = _clean_str(data[54:86])
++    released = _clean_str(data[86:118])
++
++    flags = 0
++    sid_model = "MOS6581"
++    clock = "PAL"
++
++    if version >= 2 and len(data) >= 0x0078:
++        (flags,) = struct.unpack_from(">H", data, 118)
++
++        # Clock bits 6-7: 01=PAL, 10=NTSC, 11=both
++        clock_bits = (flags >> 2) & 0x03
++        if clock_bits == 2:
++            clock = "NTSC"
++        elif clock_bits == 3:
++            clock = "PAL/NTSC"
++
++        # SID model bits 8-11: 01=MOS6581, 10=CSG8580, 11=both
++        sid_bits = (flags >> 4) & 0x03
++        if sid_bits == 2:
++            sid_model = "CSG8580"
++        elif sid_bits == 3:
++            sid_model = "MOS6581 / CSG8580"
++
++    return SidHeader(
++        magic=magic.decode("ascii"),
++        version=version,
++        data_offset=data_offset,
++        load_address=load_addr,
++        init_address=init_addr,
++        play_address=play_addr,
++        songs=max(1, songs),
++        start_song=max(1, start_song),
++        speed=speed,
++        title=title or "Unknown Title",
++        author=author or "Unknown Composer",
++        released=released or "Unknown",
++        flags=flags,
++        sid_model=sid_model,
++        clock=clock,
++    )
++
++
++def parse_duration_seconds(duration_str: str) -> int:
++    """Parse MM:SS or MM:SS.xxx into integer seconds."""
++    clean = duration_str.strip().split(".")[0]
++    parts = clean.split(":")
++    if len(parts) == 2:
++        try:
++            minutes = int(parts[0])
++            seconds = int(parts[1])
++            return minutes * 60 + seconds
++        except ValueError:
++            return DEFAULT_DURATION_SECONDS
++    elif len(parts) == 3:
++        try:
++            hours = int(parts[0])
++            minutes = int(parts[1])
++            seconds = int(parts[2])
++            return hours * 3600 + minutes * 60 + seconds
++        except ValueError:
++            return DEFAULT_DURATION_SECONDS
++    return DEFAULT_DURATION_SECONDS
++
++
++def parse_songlengths(content: str) -> dict[str, list[int]]:
++    """Parse HVSC Songlengths.txt / Songlengths.md5 database.
++
++    Lines format:
++    /MUSICIANS/H/Hubbard_Rob/Commando.sid=3:25 1:12 0:45
++    or MD5 hash format:
++    a1b2c3d4e5f6...=1:35 2:40 0:45
++    """
++    lengths_db: dict[str, list[int]] = {}
++    for line in content.splitlines():
++        line = line.strip()
++        if not line or line.startswith((";", "[")):
++            continue
++        if "=" in line:
++            key, times_str = line.split("=", 1)
++            key = key.strip()
++            times = [parse_duration_seconds(t) for t in times_str.strip().split() if t]
++            if times:
++                lengths_db[key] = times
++    return lengths_db

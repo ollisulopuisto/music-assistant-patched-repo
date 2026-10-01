@@ -1,0 +1,11 @@
+# Python
+__pycache__/
+*.py[oc]
+
+# OS / temporary files
+.DS_Store
+*~
+*.bak
+*.backup
+*.swp
+*.swo
