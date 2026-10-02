@@ -1202,7 +1202,7 @@ new file mode 100644
 index 0000000..b8f5ead
 --- /dev/null
 +++ b/music_assistant/providers/hvsc/stereo.py
-@@ -0,0 +1,163 @@
+@@ -0,0 +1,241 @@
 +"""Streaming stereo widening for PCM WAV emulator output."""
 +
 +from __future__ import annotations
@@ -1365,4 +1365,82 @@ index 0000000..b8f5ead
 +    if pending:
 +        # A conforming stereo PCM stream ends on a frame boundary. Preserve any
 +        # truncated trailing bytes rather than dropping or inventing audio data.
++        yield bytes(pending)
++
++
++async def fade_wav_stream(
++    chunks: AsyncIterable[bytes], total_frames: int, fade_seconds: float
++) -> AsyncGenerator[bytes]:
++    """Linearly fade a streamed 16-bit stereo PCM WAV to silence at its end."""
++    try:
++        fade_seconds = max(0.0, float(fade_seconds))
++    except (TypeError, ValueError):
++        fade_seconds = 0
++    if fade_seconds == 0 or total_frames <= 0:
++        async for chunk in chunks:
++            yield chunk
++        return
++
++    pending = bytearray()
++    passthrough = False
++    sample_rate = 0
++    fade_frames = 0
++    fade_start = 0
++    frame_index = 0
++
++    def fade_pcm(pcm: bytes, first_frame: int) -> bytes:
++        output = bytearray(pcm)
++        for offset in range(0, len(pcm), _FRAME_BYTES):
++            fade_position = first_frame + offset // _FRAME_BYTES - fade_start
++            gain = max(
++                0.0,
++                (fade_frames - 1 - fade_position) / max(1, fade_frames - 1),
++            )
++            left, right = struct.unpack_from("<hh", pcm, offset)
++            struct.pack_into(
++                "<hh", output, offset, round(left * gain), round(right * gain)
++            )
++        return bytes(output)
++
++    async for chunk in chunks:
++        if passthrough:
++            yield chunk
++            continue
++        if not sample_rate:
++            pending.extend(chunk)
++            header = _wav_data_header(pending)
++            if header is None:
++                continue
++            data_offset, sample_rate, supported = header
++            if data_offset == 0 or not supported:
++                yield bytes(pending)
++                pending.clear()
++                passthrough = True
++                continue
++            fade_frames = min(total_frames, round(sample_rate * fade_seconds))
++            fade_start = total_frames - fade_frames
++            yield bytes(pending[:data_offset])
++            audio = bytes(pending[data_offset:])
++            pending.clear()
++        else:
++            audio = bytes(pending) + chunk
++            pending.clear()
++
++        complete_length = len(audio) - (len(audio) % _FRAME_BYTES)
++        complete_frames = complete_length // _FRAME_BYTES
++        before_fade_frames = max(0, min(complete_frames, fade_start - frame_index))
++        before_fade_length = before_fade_frames * _FRAME_BYTES
++        if before_fade_length:
++            yield audio[:before_fade_length]
++        fade_length = complete_length - before_fade_length
++        if fade_length:
++            yield fade_pcm(
++                audio[before_fade_length:complete_length],
++                frame_index + before_fade_frames,
++            )
++        frame_index += complete_frames
++        if complete_length < len(audio):
++            pending.extend(audio[complete_length:])
++
++    if pending:
 +        yield bytes(pending)
