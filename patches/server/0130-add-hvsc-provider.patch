@@ -33,10 +33,10 @@ index 0000000..c24a127
 +    return HvscProvider(mass, manifest, config)
 diff --git a/music_assistant/providers/hvsc/audio_engine.py b/music_assistant/providers/hvsc/audio_engine.py
 new file mode 100644
-index 0000000..5763235
+index 0000000..97c685e
 --- /dev/null
 +++ b/music_assistant/providers/hvsc/audio_engine.py
-@@ -0,0 +1,217 @@
+@@ -0,0 +1,211 @@
 +"""Fetch HVSC SID files and render them with the sidplayfp emulator."""
 +
 +from __future__ import annotations
@@ -57,7 +57,6 @@ index 0000000..5763235
 +    DEFAULT_HVSC_BASE_URL,
 +    DEFAULT_SAMPLE_RATE,
 +    DEFAULT_STEREO_WIDTH,
-+    SUPPORTED_SAMPLE_RATES,
 +    SidChipModel,
 +)
 +from .stereo import widen_wav_stream
@@ -112,14 +111,9 @@ index 0000000..5763235
 +                sample_rate, "default_value", DEFAULT_SAMPLE_RATE
 +            )
 +        try:
-+            sample_rate = int(sample_rate)
++            self.sample_rate = max(8000, int(sample_rate))
 +        except (TypeError, ValueError):
-+            sample_rate = DEFAULT_SAMPLE_RATE
-+        self.sample_rate = (
-+            sample_rate
-+            if sample_rate in SUPPORTED_SAMPLE_RATES
-+            else DEFAULT_SAMPLE_RATE
-+        )
++            self.sample_rate = DEFAULT_SAMPLE_RATE
 +
 +    def build_sid_url(self, hvsc_path: str) -> str:
 +        """Build a safely escaped URL for the actual SID file in the HVSC mirror."""
@@ -456,10 +450,10 @@ index 0000000..f0a210c
 +        }
 diff --git a/music_assistant/providers/hvsc/constants.py b/music_assistant/providers/hvsc/constants.py
 new file mode 100644
-index 0000000..86a1b3c
+index 0000000..ff6b36c
 --- /dev/null
 +++ b/music_assistant/providers/hvsc/constants.py
-@@ -0,0 +1,34 @@
+@@ -0,0 +1,32 @@
 +"""Constants for the High Voltage SID Collection (HVSC) provider."""
 +
 +from __future__ import annotations
@@ -476,7 +470,6 @@ index 0000000..86a1b3c
 +CONF_LOCAL_HVSC_PATH = "local_hvsc_path"
 +CONF_EMULATOR_CMD = "emulator_cmd"
 +CONF_STEREO_WIDTH = "stereo_width"
-+CONF_SAMPLE_RATE = "sample_rate"
 +CONF_DEFAULT_DURATION = "default_duration"
 +
 +# Defaults
@@ -485,7 +478,6 @@ index 0000000..86a1b3c
 +DEFAULT_EMULATOR_CMD = "sidplayfp"
 +DEFAULT_STEREO_WIDTH = 0
 +DEFAULT_SAMPLE_RATE = 48000
-+SUPPORTED_SAMPLE_RATES = (44100, 48000, 96000)
 +
 +
 +class SidChipModel(str, Enum):
@@ -514,10 +506,10 @@ index 0000000..2a5ff4c
 +}
 diff --git a/music_assistant/providers/hvsc/provider.py b/music_assistant/providers/hvsc/provider.py
 new file mode 100644
-index 0000000..32ff125
+index 0000000..b7b7e1e
 --- /dev/null
 +++ b/music_assistant/providers/hvsc/provider.py
-@@ -0,0 +1,489 @@
+@@ -0,0 +1,469 @@
 +"""Music Assistant Provider implementation for High Voltage SID Collection (HVSC)."""
 +
 +from __future__ import annotations
@@ -559,15 +551,12 @@ index 0000000..32ff125
 +    CONF_EMULATOR_CMD,
 +    CONF_HVSC_URL,
 +    CONF_LOCAL_HVSC_PATH,
-+    CONF_SAMPLE_RATE,
 +    CONF_SID_CHIP,
 +    CONF_STEREO_WIDTH,
 +    DEFAULT_DURATION_SECONDS,
 +    DEFAULT_EMULATOR_CMD,
 +    DEFAULT_HVSC_BASE_URL,
-+    DEFAULT_SAMPLE_RATE,
 +    DEFAULT_STEREO_WIDTH,
-+    SUPPORTED_SAMPLE_RATES,
 +)
 +
 +if TYPE_CHECKING:
@@ -659,7 +648,6 @@ index 0000000..32ff125
 +            stereo_width=self._get_config_value(
 +                CONF_STEREO_WIDTH, DEFAULT_STEREO_WIDTH
 +            ),
-+            sample_rate=self._get_config_value(CONF_SAMPLE_RATE, DEFAULT_SAMPLE_RATE),
 +        )
 +
 +    async def get_config_entries(
@@ -720,22 +708,6 @@ index 0000000..32ff125
 +                description=(
 +                    "Widen rendered SID audio with a high-passed, 8 ms delayed side signal. "
 +                    "0 disables the effect; higher values increase its intensity."
-+                ),
-+                advanced=True,
-+                requires_reload=True,
-+            ),
-+            ConfigEntry(
-+                key=CONF_SAMPLE_RATE,
-+                type=ConfigEntryType.INTEGER,
-+                label="SID Render Sample Rate",
-+                default_value=DEFAULT_SAMPLE_RATE,
-+                options=[
-+                    ConfigValueOption(rate, f"{rate / 1000:g} kHz")
-+                    for rate in SUPPORTED_SAMPLE_RATES
-+                ],
-+                description=(
-+                    "Output sample rate for the rendered SID audio. Higher rates "
-+                    "increase bandwidth and processing without adding source detail."
 +                ),
 +                advanced=True,
 +                requires_reload=True,
