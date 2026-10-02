@@ -33,10 +33,10 @@ index 0000000..c24a127
 +    return HvscProvider(mass, manifest, config)
 diff --git a/music_assistant/providers/hvsc/audio_engine.py b/music_assistant/providers/hvsc/audio_engine.py
 new file mode 100644
-index 0000000..d75bf06
+index 0000000..8c6c2ee
 --- /dev/null
 +++ b/music_assistant/providers/hvsc/audio_engine.py
-@@ -0,0 +1,223 @@
+@@ -0,0 +1,231 @@
 +"""Fetch HVSC SID files and render them with the sidplayfp emulator."""
 +
 +from __future__ import annotations
@@ -118,6 +118,14 @@ index 0000000..d75bf06
 +        except (TypeError, ValueError):
 +            self.sample_rate = DEFAULT_SAMPLE_RATE
 +        try:
++            if hasattr(fade_out_seconds, "value"):
++                fade_out_seconds = (
++                    fade_out_seconds.value
++                    if fade_out_seconds.value is not None
++                    else getattr(
++                        fade_out_seconds, "default_value", DEFAULT_FADE_OUT_SECONDS
++                    )
++                )
 +            self.fade_out_seconds = max(0, min(30, int(fade_out_seconds)))
 +        except (TypeError, ValueError):
 +            self.fade_out_seconds = DEFAULT_FADE_OUT_SECONDS
@@ -520,10 +528,10 @@ index 0000000..2a5ff4c
 +}
 diff --git a/music_assistant/providers/hvsc/provider.py b/music_assistant/providers/hvsc/provider.py
 new file mode 100644
-index 0000000..db760af
+index 0000000..79da0e1
 --- /dev/null
 +++ b/music_assistant/providers/hvsc/provider.py
-@@ -0,0 +1,497 @@
+@@ -0,0 +1,502 @@
 +"""Music Assistant Provider implementation for High Voltage SID Collection (HVSC)."""
 +
 +from __future__ import annotations
@@ -646,7 +654,12 @@ index 0000000..db760af
 +        if val is None:
 +            return default
 +        if hasattr(val, "value"):
-+            val = val.value or getattr(val, "default_value", default)
++            configured_value = val.value
++            val = (
++                configured_value
++                if configured_value is not None
++                else getattr(val, "default_value", default)
++            )
 +        return val if val is not None else default
 +
 +    def _init_audio_engine(self) -> None:
