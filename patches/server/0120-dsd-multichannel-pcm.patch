@@ -1,7 +1,8 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 Subject: [PATCH] Preserve multichannel PCM and convert DSD safely
 
 diff --git a/music_assistant/constants.py b/music_assistant/constants.py
-index 095b897..6caa298 100644
+index 732b997..b171435 100644
 --- a/music_assistant/constants.py
 +++ b/music_assistant/constants.py
 @@ -446,6 +446,7 @@ CONF_ENTRY_OUTPUT_CHANNELS = ConfigEntry(
@@ -13,10 +14,10 @@ index 095b897..6caa298 100644
          ConfigValueOption("right"),
          ConfigValueOption("mono"),
 diff --git a/music_assistant/controllers/streams/audio.py b/music_assistant/controllers/streams/audio.py
-index 200fd8f..3e3a1a7 100644
+index c83c9a5..da5fa98 100644
 --- a/music_assistant/controllers/streams/audio.py
 +++ b/music_assistant/controllers/streams/audio.py
-@@ -126,9 +126,11 @@ from music_assistant.helpers.audio import (
+@@ -127,9 +127,11 @@ from music_assistant.helpers.audio import (
      get_bit_rate,
      get_normalization_mode,
      get_parts_from_position,
@@ -28,7 +29,7 @@ index 200fd8f..3e3a1a7 100644
      realtime_pcm_pacer,
      resample_pcm_audio,
      resolve_output_player_ids,
-@@ -1349,6 +1351,7 @@ class StreamsAudio:
+@@ -1235,6 +1237,7 @@ class StreamsAudio:
          content_sample_rate: int,
          content_bit_depth: int,
          media_type: MediaType = MediaType.UNKNOWN,
@@ -36,7 +37,7 @@ index 200fd8f..3e3a1a7 100644
      ) -> AudioFormat:
          """Parse (player specific) output format details for given format string."""
          content_type: ContentType = ContentType.try_parse(output_format_str)
-@@ -1375,11 +1378,17 @@ class StreamsAudio:
+@@ -1261,11 +1264,17 @@ class StreamsAudio:
              content_type = ContentType.from_bit_depth(output_bit_depth)
  
          output_channels_str = self._get_output_channels(player, player.player_id)
@@ -55,7 +56,7 @@ index 200fd8f..3e3a1a7 100644
          )
          fmt.bit_rate = get_bit_rate(fmt)
          return fmt
-@@ -1398,7 +1407,8 @@ class StreamsAudio:
+@@ -1284,7 +1293,8 @@ class StreamsAudio:
          rate the player supports that is <= the source rate, so the source is never
          upsampled. The bit depth follows the source unless audio processing
          (crossfade, volume normalization, DSP) is active — those need F32 headroom
@@ -65,7 +66,7 @@ index 200fd8f..3e3a1a7 100644
          Realtime AudioSource items skip all processing and get a pure passthrough
          format (source rate/bit depth when the player supports them).
  
-@@ -1410,12 +1420,13 @@ class StreamsAudio:
+@@ -1296,12 +1306,13 @@ class StreamsAudio:
          if streamdetails.media_type == MediaType.AUDIO_SOURCE:
              return self._select_audio_source_pcm_format(player, streamdetails)
          supported_sample_rates = [sr for sr, _ in player.get_supported_sample_rates()]
@@ -80,7 +81,7 @@ index 200fd8f..3e3a1a7 100644
              default=min(supported_sample_rates),
          )
          content_type, bit_depth = self._pick_pcm_bit_depth(
-@@ -1424,14 +1435,17 @@ class StreamsAudio:
+@@ -1310,14 +1321,17 @@ class StreamsAudio:
              crossfade_enabled,
              overlay_active,
          )
@@ -102,7 +103,7 @@ index 200fd8f..3e3a1a7 100644
          )
          if crossfade_enabled or overlay_active:
              pcm_format.channels = 2
-@@ -1510,7 +1524,7 @@ class StreamsAudio:
+@@ -1396,7 +1410,7 @@ class StreamsAudio:
              # sample rate; if the player doesn't natively support it, upsample to the
              # closest higher supported rate
              target_rate = (
@@ -111,7 +112,7 @@ index 200fd8f..3e3a1a7 100644
                  if start_streamdetails
                  else (
                      fallback_sample_rate
-@@ -1523,11 +1537,19 @@ class StreamsAudio:
+@@ -1409,11 +1423,19 @@ class StreamsAudio:
          content_type, bit_depth = self._pick_pcm_bit_depth(
              players, start_streamdetails, crossfade_enabled, overlay_active
          )
@@ -132,7 +133,7 @@ index 200fd8f..3e3a1a7 100644
          )
  
      async def get_audio_source_stream(
-@@ -2421,6 +2443,11 @@ class StreamsAudio:
+@@ -2332,6 +2354,11 @@ class StreamsAudio:
          flow_mode_sample_rate_conf, flow_supported_sample_rates = self._flow_restart_context(
              queue.queue_id, protocol_player
          )
@@ -144,7 +145,7 @@ index 200fd8f..3e3a1a7 100644
          # note: get_crossfade_mode() already falls back to standard when smart fades aren't
          # available (no analysis provider / minimal buffer), so crossfade_mode is safe to use.
          self.logger.info(
-@@ -2470,6 +2497,7 @@ class StreamsAudio:
+@@ -2389,6 +2416,7 @@ class StreamsAudio:
                      flow_supported_sample_rates,
                      flow_mode_sample_rate_conf,
                      is_first_track=queue_track is start_queue_item,
@@ -152,7 +153,7 @@ index 200fd8f..3e3a1a7 100644
                  ):
                      break
  
-@@ -4505,7 +4533,12 @@ class StreamsAudio:
+@@ -4609,7 +4637,12 @@ class StreamsAudio:
          # the depth the audio arrives in, not the one the source claims: a
          # provider that decoded on our behalf may advertise a narrower format
          # for display, and narrowing the stream to that would truncate it
@@ -166,7 +167,7 @@ index 200fd8f..3e3a1a7 100644
          return ContentType.from_bit_depth(bit_depth), bit_depth
  
      def _select_audio_source_pcm_format(
-@@ -4521,8 +4554,8 @@ class StreamsAudio:
+@@ -4625,8 +4658,8 @@ class StreamsAudio:
          channel count whenever the player can accept them; if the player does
          not support the source's sample rate, it is snapped down to the
          closest supported rate. No F32 widening — realtime sources skip every
@@ -177,7 +178,7 @@ index 200fd8f..3e3a1a7 100644
  
          :param player: The player requesting the stream.
          :param streamdetails: Stream details for the AudioSource item.
-@@ -4537,7 +4570,7 @@ class StreamsAudio:
+@@ -4641,7 +4674,7 @@ class StreamsAudio:
          # that decoded on our behalf may advertise a narrower format for display, and
          # narrowing the stream to that would truncate it
          source_format = arriving_audio_format(streamdetails)
@@ -186,7 +187,7 @@ index 200fd8f..3e3a1a7 100644
          if source_rate in resolved_sample_rates:
              output_sample_rate = source_rate
          else:
-@@ -4549,10 +4582,11 @@ class StreamsAudio:
+@@ -4653,10 +4686,11 @@ class StreamsAudio:
              content_type=ContentType.from_bit_depth(source_format.bit_depth),
              sample_rate=output_sample_rate,
              bit_depth=source_format.bit_depth,
@@ -202,7 +203,7 @@ index 200fd8f..3e3a1a7 100644
          )
  
      def _flow_restart_context(
-@@ -4589,6 +4623,7 @@ class StreamsAudio:
+@@ -4693,6 +4727,7 @@ class StreamsAudio:
          supported_sample_rates: list[int],
          flow_mode_sample_rate_conf: str,
          is_first_track: bool,
@@ -210,7 +211,7 @@ index 200fd8f..3e3a1a7 100644
      ) -> bool:
          """
          Return True if the upcoming queue track requires exiting the flow stream.
-@@ -4611,6 +4646,7 @@ class StreamsAudio:
+@@ -4715,6 +4750,7 @@ class StreamsAudio:
          :param supported_sample_rates: Sorted list of the player's supported rates.
          :param flow_mode_sample_rate_conf: The flow mode sample rate config value.
          :param is_first_track: Whether this is the first track of the flow stream.
@@ -218,7 +219,7 @@ index 200fd8f..3e3a1a7 100644
          """
          # live audio (radio, plugin or audio source) cannot be flowed; let the
          # queue controller fall back to single-item streaming for this item
-@@ -4626,7 +4662,22 @@ class StreamsAudio:
+@@ -4730,7 +4766,22 @@ class StreamsAudio:
  
          if is_first_track or queue_track.streamdetails is None:
              return False
@@ -242,18 +243,148 @@ index 200fd8f..3e3a1a7 100644
          if not raw_next_rate or not supported_sample_rates:
              return False
          effective_next_rate = _snap_supported_rate_up(raw_next_rate, supported_sample_rates)
+diff --git a/music_assistant/controllers/streams/audio_analysis.py b/music_assistant/controllers/streams/audio_analysis.py
+index bcd47d4..4230e48 100644
+--- a/music_assistant/controllers/streams/audio_analysis.py
++++ b/music_assistant/controllers/streams/audio_analysis.py
+@@ -19,7 +19,7 @@ from music_assistant_models.auth import Scope
+ from music_assistant_models.background_task import TaskSchedule
+ from music_assistant_models.enums import ContentType, MediaType, ProviderType, StreamType
+ from music_assistant_models.errors import ProviderUnavailableError
+-from music_assistant_models.media_items import AudioMetadata
++from music_assistant_models.media_items import AudioFormat, AudioMetadata
+ 
+ from music_assistant.constants import (
+     CONF_BACKGROUND_SCAN_CONCURRENCY,
+@@ -33,6 +33,7 @@ from music_assistant.constants import (
+ from music_assistant.controllers.streams.audio_buffer import AudioBufferDiscarded, AudioBufferEOF
+ from music_assistant.helpers.api import api_command
+ from music_assistant.helpers.datetime import local_clock_time_to_utc, utc_timestamp
++from music_assistant.helpers.ffmpeg import get_ffmpeg_stream
+ from music_assistant.helpers.json import json_dumps, json_loads
+ from music_assistant.helpers.util import inference_thread_budget, is_arm
+ from music_assistant.models.audio_analysis import AudioAnalysisData
+@@ -88,7 +89,7 @@ LOGGER = logging.getLogger(f"{MASS_LOGGER_NAME}.audio_analysis")
+ if TYPE_CHECKING:
+     from datetime import datetime
+ 
+-    from music_assistant_models.media_items import AudioFormat, Track
++    from music_assistant_models.media_items import Track
+     from music_assistant_models.streamdetails import StreamDetails
+ 
+     from music_assistant.controllers.streams.audio_buffer import AudioBuffer
+@@ -211,6 +212,18 @@ def _nice_analysis_worker() -> None:
+         os.setpriority(os.PRIO_PROCESS, 0, ANALYSIS_THREAD_NICE)
+ 
+ 
++def _analysis_pcm_format(pcm_format: AudioFormat) -> AudioFormat:
++    """Keep playback PCM intact while limiting analyzer input to mono or stereo."""
++    if pcm_format.channels <= 2:
++        return pcm_format
++    return AudioFormat(
++        content_type=pcm_format.content_type,
++        sample_rate=pcm_format.sample_rate,
++        bit_depth=pcm_format.bit_depth,
++        channels=2,
++    )
++
++
+ class AudioAnalysisController:
+     """Controller that distributes PCM chunks to all registered AudioAnalysisProviders."""
+ 
+@@ -372,8 +385,9 @@ class AudioAnalysisController:
+             )
+             return
+ 
++        analysis_format = _analysis_pcm_format(audio_buffer.pcm_format)
+         provider_ids = await self._start_analysis_on_providers(
+-            session_key, streamdetails, audio_buffer.pcm_format, providers
++            session_key, streamdetails, analysis_format, providers
+         )
+         if not provider_ids:
+             self.logger.debug("No providers accepted analysis for %s", session_key)
+@@ -1493,13 +1507,16 @@ class AudioAnalysisController:
+         start_chunk = audio_buffer.first_buffered_chunk
+         cursor = start_chunk
+         completed = False
+-        try:
++
++        async def _iter_input_chunks() -> AsyncGenerator[bytes]:
++            """Read retained playback PCM without advancing or evicting its buffer."""
++            nonlocal cursor, completed
+             while session_key in self._active_sessions:
+                 try:
+                     chunk = await audio_buffer.read_chunk_for_analysis(cursor)
+                 except AudioBufferEOF:
+                     completed = True
+-                    break
++                    return
+                 except AudioBufferDiscarded:
+                     self.logger.debug(
+                         "Analysis fell behind the playback buffer for %s (chunk %d evicted); "
+@@ -1507,14 +1524,44 @@ class AudioAnalysisController:
+                         session_key,
+                         cursor,
+                     )
+-                    break
++                    return
+                 except Exception as err:
+                     self.logger.debug("Analysis read failed for %s: %s", session_key, err)
+-                    break
+-                await self._distribute_chunk(
+-                    session_key, chunk, max_interval=CHUNK_HANG_GUARD_SECONDS
+-                )
++                    return
+                 cursor += 1
++                yield chunk
++
++        try:
++            input_format = audio_buffer.pcm_format
++            analysis_format = _analysis_pcm_format(input_format)
++            if analysis_format.channels == input_format.channels:
++                async for chunk in _iter_input_chunks():
++                    await self._distribute_chunk(
++                        session_key, chunk, max_interval=CHUNK_HANG_GUARD_SECONDS
++                    )
++            else:
++                pcm_bytes_per_second = analysis_format.pcm_sample_size
++                pending = bytearray()
++                async for chunk in get_ffmpeg_stream(
++                    audio_input=_iter_input_chunks(),
++                    input_format=input_format,
++                    output_format=analysis_format,
++                ):
++                    pending.extend(chunk)
++                    while len(pending) >= pcm_bytes_per_second:
++                        analysis_chunk = bytes(pending[:pcm_bytes_per_second])
++                        del pending[:pcm_bytes_per_second]
++                        await self._distribute_chunk(
++                            session_key,
++                            analysis_chunk,
++                            max_interval=CHUNK_HANG_GUARD_SECONDS,
++                        )
++                if pending:
++                    await self._distribute_chunk(
++                        session_key, bytes(pending), max_interval=CHUNK_HANG_GUARD_SECONDS
++                    )
++        except Exception as err:
++            self.logger.debug("Analysis PCM conversion failed for %s: %s", session_key, err)
+         finally:
+             self._workers.pop(session_key, None)
+             self._session_queues.pop(session_key, None)
 diff --git a/music_assistant/controllers/streams/audio_buffer.py b/music_assistant/controllers/streams/audio_buffer.py
-index e66e3f3..87c5f3b 100644
+index 4586468..9894aff 100644
 --- a/music_assistant/controllers/streams/audio_buffer.py
 +++ b/music_assistant/controllers/streams/audio_buffer.py
-@@ -31,13 +31,18 @@ from music_assistant.controllers.streams.constants import (
+@@ -31,6 +31,7 @@ from music_assistant.controllers.streams.constants import (
      BUFFER_SIZE_MAP,
      CONF_BUFFER_SIZE,
      CONF_BUFFER_SIZE_DEFAULT,
 +    MAX_BUFFER_SIZE_BYTES,
      RADIO_BUFFER_SIZE,
-     SEEK_WAIT_THRESHOLD,
-     STREAM_SLOT_WAIT_TIMEOUT,
+     REALTIME_COLD_START_BANK,
+     REALTIME_COLD_START_MAX_REMAINING,
+@@ -39,7 +40,11 @@ from music_assistant.controllers.streams.constants import (
      BufferMode,
      BufferSize,
  )
@@ -266,7 +397,7 @@ index e66e3f3..87c5f3b 100644
  from music_assistant.helpers.ffmpeg import get_ffmpeg_stream
  from music_assistant.models.music_provider import MusicProvider
  
-@@ -96,9 +101,14 @@ class AudioBuffer:
+@@ -98,9 +103,14 @@ class AudioBuffer:
          """
          self.pcm_format = pcm_format
          self.is_realtime = is_realtime
@@ -282,7 +413,7 @@ index e66e3f3..87c5f3b 100644
          self.mode = mode
          self._ready_threshold = ready_threshold
          self._ready_at_chunk = ready_threshold  # updated by get_buffer to account for seek
-@@ -906,11 +916,16 @@ def _buffer_pcm_format(streamdetails: StreamDetails) -> AudioFormat:
+@@ -916,13 +926,18 @@ def _buffer_pcm_format(streamdetails: StreamDetails) -> AudioFormat:
      :param streamdetails: The stream the buffer is for.
      """
      arriving = arriving_audio_format(streamdetails)
@@ -305,8 +436,10 @@ index e66e3f3..87c5f3b 100644
 +        bit_depth=bit_depth,
 +        channels=min(arriving.channels, 8),
      )
+ 
+ 
 diff --git a/music_assistant/controllers/streams/constants.py b/music_assistant/controllers/streams/constants.py
-index 70ed042..f45d7a3 100644
+index d913364..1ad22af 100644
 --- a/music_assistant/controllers/streams/constants.py
 +++ b/music_assistant/controllers/streams/constants.py
 @@ -55,6 +55,10 @@ BUFFER_SIZE_MAP: Final[dict[str, int]] = {
@@ -321,7 +454,7 @@ index 70ed042..f45d7a3 100644
  RADIO_BUFFER_SIZE: Final[int] = 15
  
 diff --git a/music_assistant/controllers/streams/controller.py b/music_assistant/controllers/streams/controller.py
-index b2c710c..25dd82a 100644
+index f6e6240..cedebe2 100644
 --- a/music_assistant/controllers/streams/controller.py
 +++ b/music_assistant/controllers/streams/controller.py
 @@ -840,6 +840,7 @@ class StreamsController(CoreController):
@@ -340,7 +473,7 @@ index b2c710c..25dd82a 100644
          )
          # work out ICY metadata support
          icy_preference = self.mass.config.get_raw_player_config_value(
-@@ -1902,6 +1904,7 @@ class StreamsController(CoreController):
+@@ -1910,6 +1912,7 @@ class StreamsController(CoreController):
              content_sample_rate=pcm_format.sample_rate,
              content_bit_depth=pcm_format.bit_depth,
              media_type=MediaType.AUDIO_SOURCE,
@@ -400,6 +533,23 @@ index fc86ed4..5cf16a8 100644
          for b in dsp_filter.bands:
              if not b.enabled:
                  continue
+diff --git a/music_assistant/helpers/ffmpeg.py b/music_assistant/helpers/ffmpeg.py
+index c32ea53..4604342 100644
+--- a/music_assistant/helpers/ffmpeg.py
++++ b/music_assistant/helpers/ffmpeg.py
+@@ -771,6 +771,12 @@ def _get_channel_layout_name(channels: int) -> str | None:
+         return "mono"
+     if channels == 2:
+         return "stereo"
++    if channels == 6:
++        # The shared PCM buffer carries samples but no channel-layout metadata. Use the
++        # side-surround 5.1 layout as the canonical six-channel order so a 5.1(side)
++        # source is not later reinterpreted as back-surround 5.1 when the raw buffer is
++        # read for player output. FFmpeg rematrixes a back-surround source to this order.
++        return "5.1(side)"
+     # a wider count maps to several possible layouts (5.1 vs 5.1(side), 7.1 vs 7.1(wide), ...)
+     # and a named layout wins over -ac, so naming the wrong one would make FFmpeg misread the
+     # stream as that layout. Left unnamed, it derives the default for the count itself.
 diff --git a/music_assistant/providers/filesystem_local/constants.py b/music_assistant/providers/filesystem_local/constants.py
 index 1a3b044..a04327c 100644
 --- a/music_assistant/providers/filesystem_local/constants.py
@@ -413,22 +563,106 @@ index 1a3b044..a04327c 100644
      "oga",
      "dff",
 diff --git a/music_assistant/providers/squeezelite/provider.py b/music_assistant/providers/squeezelite/provider.py
-index e9038c1..a958620 100644
+index aef8844..fc75e1d 100644
 --- a/music_assistant/providers/squeezelite/provider.py
 +++ b/music_assistant/providers/squeezelite/provider.py
-@@ -242,6 +242,7 @@ class SqueezelitePlayerProvider(PlayerProvider):
+@@ -223,6 +223,7 @@ class SqueezelitePlayerProvider(PlayerProvider):
              content_sample_rate=stream.audio_format.sample_rate,  # Flow PCM sample rate
              content_bit_depth=stream.audio_format.bit_depth,  # Flow PCM bit depth (32)
              media_type=MediaType.FLOW_STREAM,
 +            content_channels=stream.audio_format.channels,
          )
-         output_plan = self.mass.streams.audio.get_player_output_plan(
-             child_player_id,
+         # squeezelite takes the PCM params from the Content-Type, not from the WAV header
+         resp = web.StreamResponse(
+diff --git a/music_assistant/translations/en.json b/music_assistant/translations/en.json
+index 6b8191f..820ae1b 100644
+--- a/music_assistant/translations/en.json
++++ b/music_assistant/translations/en.json
+@@ -176,9 +176,10 @@
+   "common.config_entries.mute_control.options.follow_protocol": "Auto-select (based on active/preferred protocol)",
+   "common.config_entries.mute_control.options.native": "Native mute control",
+   "common.config_entries.mute_control.options.none": "None",
+-  "common.config_entries.output_channels.description": "You can configure this player to play only the left or right channel, for example to create a stereo pair with 2 players.",
++  "common.config_entries.output_channels.description": "Choose stereo for stereo or 2.1 systems, multichannel for a player that accepts surround PCM, or configure left, right, or mono output.",
+   "common.config_entries.output_channels.label": "Output Channel Mode",
+   "common.config_entries.output_channels.options.left": "Left channel only",
++  "common.config_entries.output_channels.options.multichannel": "Multichannel (preserve source channels)",
+   "common.config_entries.output_channels.options.mono": "Mono (both channels)",
+   "common.config_entries.output_channels.options.right": "Right channel only",
+   "common.config_entries.output_channels.options.stereo": "Stereo (both channels)",
+diff --git a/tests/controllers/streams/test_audio_analysis_controller.py b/tests/controllers/streams/test_audio_analysis_controller.py
+index 3028a55..f958c2b 100644
+--- a/tests/controllers/streams/test_audio_analysis_controller.py
++++ b/tests/controllers/streams/test_audio_analysis_controller.py
+@@ -4,12 +4,14 @@ from __future__ import annotations
+ 
+ import asyncio
+ import unittest.mock
++from collections.abc import AsyncGenerator
+ from unittest.mock import AsyncMock, MagicMock
+ 
+ import pytest
+ from music_assistant_models.enums import ContentType, MediaType
+ from music_assistant_models.media_items import AudioFormat
+ 
++import music_assistant.controllers.streams.audio_analysis as analysis_module
+ from music_assistant.controllers.streams.audio_analysis import (
+     REALTIME_ANALYSIS_MAX_SESSIONS,
+     AudioAnalysisController,
+@@ -192,6 +194,48 @@ async def test_chunks_delivered_to_provider(
+     assert mock_provider.process_pcm_chunk.call_count == 3
+ 
+ 
++@pytest.mark.asyncio
++async def test_multichannel_buffer_is_downmixed_for_analysis_only(
++    controller: AudioAnalysisController,
++    mock_stream_details: MagicMock,
++    mock_provider: MagicMock,
++    mock_mass: MagicMock,
++    monkeypatch: pytest.MonkeyPatch,
++) -> None:
++    """Keep six-channel playback PCM intact while analyzers receive stereo PCM."""
++    surround_format = AudioFormat(
++        content_type=ContentType.PCM_S16LE,
++        sample_rate=44100,
++        bit_depth=16,
++        channels=6,
++    )
++    audio_buffer = AudioBuffer(surround_format)
++
++    async def _fake_ffmpeg_stream(
++        audio_input: AsyncGenerator[bytes],
++        input_format: AudioFormat,
++        output_format: AudioFormat,
++    ) -> AsyncGenerator[bytes]:
++        assert input_format.channels == 6
++        assert output_format.channels == 2
++        async for _chunk in audio_input:
++            pass
++        yield ONE_SECOND_CHUNK
++
++    monkeypatch.setattr(analysis_module, "get_ffmpeg_stream", _fake_ffmpeg_stream)
++
++    await controller.start_analysis(audio_buffer, mock_stream_details)
++    mock_provider.start_analysis.assert_awaited_once()
++    assert mock_provider.start_analysis.call_args.kwargs["audio_format"].channels == 2
++
++    await audio_buffer._put(b"\x00" * surround_format.pcm_sample_size)
++    await audio_buffer._set_eof()
++    await _await_tasks(mock_mass)
++
++    assert audio_buffer.pcm_format.channels == 6
++    assert mock_provider.process_pcm_chunk.await_args.args[1] == ONE_SECOND_CHUNK
++
++
+ @pytest.mark.asyncio
+ async def test_finalize_called_on_eof(
+     controller: AudioAnalysisController,
 diff --git a/tests/controllers/streams/test_audio_buffer.py b/tests/controllers/streams/test_audio_buffer.py
-index a178d42..f5ddcf5 100644
+index 94a7563..0edaea9 100644
 --- a/tests/controllers/streams/test_audio_buffer.py
 +++ b/tests/controllers/streams/test_audio_buffer.py
-@@ -24,6 +24,7 @@ from music_assistant.controllers.streams.audio_buffer import (
+@@ -24,9 +24,11 @@ from music_assistant.controllers.streams.audio_buffer import (
      AudioBuffer,
      AudioBufferDiscarded,
      AudioBufferEOF,
@@ -436,10 +670,30 @@ index a178d42..f5ddcf5 100644
  )
  from music_assistant.controllers.streams.constants import (
      BUFFER_SIZE_MAP,
-@@ -124,6 +125,26 @@ def test_init_defaults() -> None:
++    MAX_BUFFER_SIZE_BYTES,
+     RADIO_BUFFER_SIZE,
+     REALTIME_COLD_START_BANK,
+     SEEK_WAIT_THRESHOLD,
+@@ -125,6 +127,42 @@ def test_init_defaults() -> None:
      assert not buf.ready.is_set()
  
  
++def test_high_resolution_multichannel_buffer_is_memory_capped() -> None:
++    """High-rate eight-channel PCM cannot retain the full maximum duration preset."""
++    pcm_format = AudioFormat(
++        content_type=ContentType.PCM_S24LE,
++        sample_rate=192000,
++        bit_depth=24,
++        channels=8,
++    )
++
++    buf = AudioBuffer(pcm_format, buffer_size=BufferSize.MAXIMUM)
++
++    assert buf.max_size_seconds == MAX_BUFFER_SIZE_BYTES // pcm_format.pcm_sample_size
++    assert buf.max_size_seconds < BUFFER_SIZE_MAP[BufferSize.MAXIMUM]
++    assert buf.max_size_seconds * pcm_format.pcm_sample_size <= MAX_BUFFER_SIZE_BYTES
++
++
 +def test_dsd_buffer_format_uses_decoded_pcm_size_and_rate() -> None:
 +    """Packed DSD is buffered using its decoded PCM rate, depth and channel count."""
 +    streamdetails = MagicMock()
@@ -689,286 +943,8 @@ index 1596a94..783c55e 100644
  def test_parametric_eq_peak_band() -> None:
      """Test that an enabled peak band maps to a biquad filter with cookbook coefficients."""
      band = ParametricEQBand(
-diff --git a/tests/providers/filesystem/test_sync_config.py b/tests/providers/filesystem/test_sync_config.py
-index 3d17d4f..616a548 100644
---- a/tests/providers/filesystem/test_sync_config.py
-+++ b/tests/providers/filesystem/test_sync_config.py
-@@ -113,6 +113,10 @@ class TestSyncLibraryEarlyReturn:
- class TestProcessItemRespectsConfig:
-     """Test that _process_item_async skips items when sync is disabled."""
- 
-+    def test_dts_is_a_supported_track_extension(self) -> None:
-+        """Standalone DTS bitstreams in local libraries are discovered for decoding."""
-+        assert "dts" in TRACK_EXTENSIONS
-+
-     @pytest.mark.asyncio
-     async def test_tracks_skipped_when_sync_disabled(self) -> None:
-         """Track files are not imported when track sync is disabled."""
-diff --git a/music_assistant/translations/en.json b/music_assistant/translations/en.json
-index cc3c9ab..e7ee0a2 100644
---- a/music_assistant/translations/en.json
-+++ b/music_assistant/translations/en.json
-@@ -176,9 +176,10 @@
-   "common.config_entries.mute_control.options.follow_protocol": "Auto-select (based on active/preferred protocol)",
-   "common.config_entries.mute_control.options.native": "Native mute control",
-   "common.config_entries.mute_control.options.none": "None",
--  "common.config_entries.output_channels.description": "You can configure this player to play only the left or right channel, for example to create a stereo pair with 2 players.",
-+  "common.config_entries.output_channels.description": "Choose stereo for stereo or 2.1 systems, multichannel for a player that accepts surround PCM, or configure left, right, or mono output.",
-   "common.config_entries.output_channels.label": "Output Channel Mode",
-   "common.config_entries.output_channels.options.left": "Left channel only",
-+  "common.config_entries.output_channels.options.multichannel": "Multichannel (preserve source channels)",
-   "common.config_entries.output_channels.options.mono": "Mono (both channels)",
-   "common.config_entries.output_channels.options.right": "Right channel only",
-   "common.config_entries.output_channels.options.stereo": "Stereo (both channels)",
-diff --git a/music_assistant/controllers/streams/audio_analysis.py b/music_assistant/controllers/streams/audio_analysis.py
-index 6f3a31f..091852c 100644
---- a/music_assistant/controllers/streams/audio_analysis.py
-+++ b/music_assistant/controllers/streams/audio_analysis.py
-@@ -19,7 +19,7 @@ from music_assistant_models.auth import Scope
- from music_assistant_models.background_task import TaskSchedule
- from music_assistant_models.enums import ContentType, MediaType, ProviderType, StreamType
- from music_assistant_models.errors import ProviderUnavailableError
--from music_assistant_models.media_items import AudioMetadata
-+from music_assistant_models.media_items import AudioFormat, AudioMetadata
- 
- from music_assistant.constants import (
-     CONF_BACKGROUND_SCAN_CONCURRENCY,
-@@ -33,6 +33,7 @@ from music_assistant.constants import (
- from music_assistant.controllers.streams.audio_buffer import AudioBufferDiscarded, AudioBufferEOF
- from music_assistant.helpers.api import api_command
- from music_assistant.helpers.datetime import local_clock_time_to_utc, utc_timestamp
-+from music_assistant.helpers.ffmpeg import get_ffmpeg_stream
- from music_assistant.helpers.json import json_dumps, json_loads
- from music_assistant.helpers.util import inference_thread_budget, is_arm
- from music_assistant.models.audio_analysis import AudioAnalysisData
-@@ -88,7 +89,7 @@ LOGGER = logging.getLogger(f"{MASS_LOGGER_NAME}.audio_analysis")
- if TYPE_CHECKING:
-     from datetime import datetime
- 
--    from music_assistant_models.media_items import AudioFormat, Track
-+    from music_assistant_models.media_items import Track
-     from music_assistant_models.streamdetails import StreamDetails
- 
-     from music_assistant.controllers.streams.audio_buffer import AudioBuffer
-@@ -211,6 +212,18 @@ def _nice_analysis_worker() -> None:
-         os.setpriority(os.PRIO_PROCESS, 0, ANALYSIS_THREAD_NICE)
- 
- 
-+def _analysis_pcm_format(pcm_format: AudioFormat) -> AudioFormat:
-+    """Keep playback PCM intact while limiting analyzer input to mono or stereo."""
-+    if pcm_format.channels <= 2:
-+        return pcm_format
-+    return AudioFormat(
-+        content_type=pcm_format.content_type,
-+        sample_rate=pcm_format.sample_rate,
-+        bit_depth=pcm_format.bit_depth,
-+        channels=2,
-+    )
-+
-+
- class AudioAnalysisController:
-     """Controller that distributes PCM chunks to all registered AudioAnalysisProviders."""
- 
-@@ -372,8 +385,9 @@ class AudioAnalysisController:
-             )
-             return
- 
-+        analysis_format = _analysis_pcm_format(audio_buffer.pcm_format)
-         provider_ids = await self._start_analysis_on_providers(
--            session_key, streamdetails, audio_buffer.pcm_format, providers
-+            session_key, streamdetails, analysis_format, providers
-         )
-         if not provider_ids:
-             self.logger.debug("No providers accepted analysis for %s", session_key)
-@@ -1489,13 +1503,16 @@ class AudioAnalysisController:
-         start_chunk = audio_buffer.first_buffered_chunk
-         cursor = start_chunk
-         completed = False
--        try:
-+
-+        async def _iter_input_chunks() -> AsyncGenerator[bytes]:
-+            """Read retained playback PCM without advancing or evicting its buffer."""
-+            nonlocal cursor, completed
-             while session_key in self._active_sessions:
-                 try:
-                     chunk = await audio_buffer.read_chunk_for_analysis(cursor)
-                 except AudioBufferEOF:
-                     completed = True
--                    break
-+                    return
-                 except AudioBufferDiscarded:
-                     self.logger.debug(
-                         "Analysis fell behind the playback buffer for %s (chunk %d evicted); "
-@@ -1503,14 +1520,44 @@ class AudioAnalysisController:
-                         session_key,
-                         cursor,
-                     )
--                    break
-+                    return
-                 except Exception as err:
-                     self.logger.debug("Analysis read failed for %s: %s", session_key, err)
--                    break
--                await self._distribute_chunk(
--                    session_key, chunk, max_interval=CHUNK_HANG_GUARD_SECONDS
--                )
-+                    return
-                 cursor += 1
-+                yield chunk
-+
-+        try:
-+            input_format = audio_buffer.pcm_format
-+            analysis_format = _analysis_pcm_format(input_format)
-+            if analysis_format.channels == input_format.channels:
-+                async for chunk in _iter_input_chunks():
-+                    await self._distribute_chunk(
-+                        session_key, chunk, max_interval=CHUNK_HANG_GUARD_SECONDS
-+                    )
-+            else:
-+                pcm_bytes_per_second = analysis_format.pcm_sample_size
-+                pending = bytearray()
-+                async for chunk in get_ffmpeg_stream(
-+                    audio_input=_iter_input_chunks(),
-+                    input_format=input_format,
-+                    output_format=analysis_format,
-+                ):
-+                    pending.extend(chunk)
-+                    while len(pending) >= pcm_bytes_per_second:
-+                        analysis_chunk = bytes(pending[:pcm_bytes_per_second])
-+                        del pending[:pcm_bytes_per_second]
-+                        await self._distribute_chunk(
-+                            session_key,
-+                            analysis_chunk,
-+                            max_interval=CHUNK_HANG_GUARD_SECONDS,
-+                        )
-+                if pending:
-+                    await self._distribute_chunk(
-+                        session_key, bytes(pending), max_interval=CHUNK_HANG_GUARD_SECONDS
-+                    )
-+        except Exception as err:
-+            self.logger.debug("Analysis PCM conversion failed for %s: %s", session_key, err)
-         finally:
-             self._workers.pop(session_key, None)
-             self._session_queues.pop(session_key, None)
-diff --git a/tests/controllers/streams/test_audio_analysis_controller.py b/tests/controllers/streams/test_audio_analysis_controller.py
-index 3028a55..f958c2b 100644
---- a/tests/controllers/streams/test_audio_analysis_controller.py
-+++ b/tests/controllers/streams/test_audio_analysis_controller.py
-@@ -4,12 +4,14 @@ from __future__ import annotations
- 
- import asyncio
- import unittest.mock
-+from collections.abc import AsyncGenerator
- from unittest.mock import AsyncMock, MagicMock
- 
- import pytest
- from music_assistant_models.enums import ContentType, MediaType
- from music_assistant_models.media_items import AudioFormat
- 
-+import music_assistant.controllers.streams.audio_analysis as analysis_module
- from music_assistant.controllers.streams.audio_analysis import (
-     REALTIME_ANALYSIS_MAX_SESSIONS,
-     AudioAnalysisController,
-@@ -192,6 +194,48 @@ async def test_chunks_delivered_to_provider(
-     assert mock_provider.process_pcm_chunk.call_count == 3
- 
- 
-+@pytest.mark.asyncio
-+async def test_multichannel_buffer_is_downmixed_for_analysis_only(
-+    controller: AudioAnalysisController,
-+    mock_stream_details: MagicMock,
-+    mock_provider: MagicMock,
-+    mock_mass: MagicMock,
-+    monkeypatch: pytest.MonkeyPatch,
-+) -> None:
-+    """Keep six-channel playback PCM intact while analyzers receive stereo PCM."""
-+    surround_format = AudioFormat(
-+        content_type=ContentType.PCM_S16LE,
-+        sample_rate=44100,
-+        bit_depth=16,
-+        channels=6,
-+    )
-+    audio_buffer = AudioBuffer(surround_format)
-+
-+    async def _fake_ffmpeg_stream(
-+        audio_input: AsyncGenerator[bytes],
-+        input_format: AudioFormat,
-+        output_format: AudioFormat,
-+    ) -> AsyncGenerator[bytes]:
-+        assert input_format.channels == 6
-+        assert output_format.channels == 2
-+        async for _chunk in audio_input:
-+            pass
-+        yield ONE_SECOND_CHUNK
-+
-+    monkeypatch.setattr(analysis_module, "get_ffmpeg_stream", _fake_ffmpeg_stream)
-+
-+    await controller.start_analysis(audio_buffer, mock_stream_details)
-+    mock_provider.start_analysis.assert_awaited_once()
-+    assert mock_provider.start_analysis.call_args.kwargs["audio_format"].channels == 2
-+
-+    await audio_buffer._put(b"\x00" * surround_format.pcm_sample_size)
-+    await audio_buffer._set_eof()
-+    await _await_tasks(mock_mass)
-+
-+    assert audio_buffer.pcm_format.channels == 6
-+    assert mock_provider.process_pcm_chunk.await_args.args[1] == ONE_SECOND_CHUNK
-+
-+
- @pytest.mark.asyncio
- async def test_finalize_called_on_eof(
-     controller: AudioAnalysisController,
-diff --git a/tests/controllers/streams/test_audio_buffer.py b/tests/controllers/streams/test_audio_buffer.py
---- a/tests/controllers/streams/test_audio_buffer.py
-+++ b/tests/controllers/streams/test_audio_buffer.py
-@@ -28,6 +28,7 @@
- )
- from music_assistant.controllers.streams.constants import (
-     BUFFER_SIZE_MAP,
-+    MAX_BUFFER_SIZE_BYTES,
-     RADIO_BUFFER_SIZE,
-     SEEK_WAIT_THRESHOLD,
-     BufferMode,
-@@ -125,6 +126,22 @@
-     assert not buf.ready.is_set()
- 
- 
-+def test_high_resolution_multichannel_buffer_is_memory_capped() -> None:
-+    """High-rate eight-channel PCM cannot retain the full maximum duration preset."""
-+    pcm_format = AudioFormat(
-+        content_type=ContentType.PCM_S24LE,
-+        sample_rate=192000,
-+        bit_depth=24,
-+        channels=8,
-+    )
-+
-+    buf = AudioBuffer(pcm_format, buffer_size=BufferSize.MAXIMUM)
-+
-+    assert buf.max_size_seconds == MAX_BUFFER_SIZE_BYTES // pcm_format.pcm_sample_size
-+    assert buf.max_size_seconds < BUFFER_SIZE_MAP[BufferSize.MAXIMUM]
-+    assert buf.max_size_seconds * pcm_format.pcm_sample_size <= MAX_BUFFER_SIZE_BYTES
-+
-+
- def test_dsd_buffer_format_uses_decoded_pcm_size_and_rate() -> None:
-     """Packed DSD is buffered using its decoded PCM rate, depth and channel count."""
-     streamdetails = MagicMock()
-diff --git a/music_assistant/helpers/ffmpeg.py b/music_assistant/helpers/ffmpeg.py
---- a/music_assistant/helpers/ffmpeg.py
-+++ b/music_assistant/helpers/ffmpeg.py
-@@ -773,6 +773,12 @@ def _get_channel_layout_name(channels: int) -> str | None:
-         return "mono"
-     if channels == 2:
-         return "stereo"
-+    if channels == 6:
-+        # The shared PCM buffer carries samples but no channel-layout metadata. Use the
-+        # side-surround 5.1 layout as the canonical six-channel order so a 5.1(side)
-+        # source is not later reinterpreted as back-surround 5.1 when the raw buffer is
-+        # read for player output. FFmpeg rematrixes a back-surround source to this order.
-+        return "5.1(side)"
-     # a wider count maps to several possible layouts (5.1 vs 5.1(side), 7.1 vs 7.1(wide), ...)
-     # and a named layout wins over -ac, so naming the wrong one would make FFmpeg misread the
-     # stream as that layout. Left unnamed, it derives the default for the count itself.
 diff --git a/tests/helpers/test_ffmpeg.py b/tests/helpers/test_ffmpeg.py
-index d8cbabc..44f20ba 100644
+index 13a4325..9908549 100644
 --- a/tests/helpers/test_ffmpeg.py
 +++ b/tests/helpers/test_ffmpeg.py
 @@ -89,10 +89,10 @@ def _split_at_input(args: list[str]) -> tuple[list[str], list[str]]:
@@ -1009,3 +985,18 @@ index d8cbabc..44f20ba 100644
          assert "-channel_layout" not in part
  
  
+diff --git a/tests/providers/filesystem/test_sync_config.py b/tests/providers/filesystem/test_sync_config.py
+index 3d17d4f..616a548 100644
+--- a/tests/providers/filesystem/test_sync_config.py
++++ b/tests/providers/filesystem/test_sync_config.py
+@@ -113,6 +113,10 @@ class TestSyncLibraryEarlyReturn:
+ class TestProcessItemRespectsConfig:
+     """Test that _process_item_async skips items when sync is disabled."""
+ 
++    def test_dts_is_a_supported_track_extension(self) -> None:
++        """Standalone DTS bitstreams in local libraries are discovered for decoding."""
++        assert "dts" in TRACK_EXTENSIONS
++
+     @pytest.mark.asyncio
+     async def test_tracks_skipped_when_sync_disabled(self) -> None:
+         """Track files are not imported when track sync is disabled."""
