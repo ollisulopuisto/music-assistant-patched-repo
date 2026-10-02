@@ -1,0 +1,38 @@
+Build the upstream sidplayfp CLI with SIDLite for the runtime image
+
+Debian Trixie's sidplayfp package predates the CLI's --sidlite option. Build
+the pinned upstream libsidplayfp and sidplayfp releases, then copy their
+runtime files into the Music Assistant image.
+
+diff --git a/Dockerfile b/Dockerfile
+index 63d45a4..3ab7df7 100644
+--- a/Dockerfile
++++ b/Dockerfile
+@@ -118,9 +118,27 @@ RUN chmod -R 777 /app \
+ 
+ ##################################################################################################
+ 
++# Build the current upstream emulator with its fast SIDLite core enabled.
++FROM ghcr.io/music-assistant/base:$BASE_IMAGE_VERSION AS sidplayfp-builder
++RUN apt-get update && apt-get install -y --no-install-recommends \
++    autoconf autoconf-archive automake build-essential ca-certificates git libgcrypt20-dev libtool pkg-config xa65 \
++    && git clone --depth 1 --branch v3.0.2 --recurse-submodules \
++        https://github.com/libsidplayfp/libsidplayfp.git /tmp/libsidplayfp \
++    && cd /tmp/libsidplayfp && autoreconf -vfi && ./configure --prefix=/usr/local \
++    && make -j2 && make install \
++    && git clone --depth 1 --branch v3.2.0 --recurse-submodules \
++        https://github.com/libsidplayfp/sidplayfp.git /tmp/sidplayfp \
++    && cd /tmp/sidplayfp && autoreconf -vfi && ./configure --prefix=/usr/local \
++    && make -j2 && make install \
++    && rm -rf /tmp/libsidplayfp /tmp/sidplayfp /var/lib/apt/lists/*
++
+ # FINAL docker image for music assistant server
+ 
+ FROM ghcr.io/music-assistant/base:$BASE_IMAGE_VERSION
++RUN apt-get update && apt-get install -y --no-install-recommends libgcrypt20 \
++    && rm -rf /var/lib/apt/lists/*
++COPY --from=sidplayfp-builder /usr/local /usr/local
++RUN ldconfig && sidplayfp --help >/dev/null
+ 
+ ENV VIRTUAL_ENV=/app/venv
+ ENV PATH="$VIRTUAL_ENV/bin:$PATH"
