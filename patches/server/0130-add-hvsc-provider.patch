@@ -528,10 +528,10 @@ index 0000000..2a5ff4c
 +}
 diff --git a/music_assistant/providers/hvsc/provider.py b/music_assistant/providers/hvsc/provider.py
 new file mode 100644
-index 0000000..79da0e1
+index 0000000..5709e32
 --- /dev/null
 +++ b/music_assistant/providers/hvsc/provider.py
-@@ -0,0 +1,502 @@
+@@ -0,0 +1,503 @@
 +"""Music Assistant Provider implementation for High Voltage SID Collection (HVSC)."""
 +
 +from __future__ import annotations
@@ -764,6 +764,7 @@ index 0000000..79da0e1
 +                range=(0, 30),
 +                description="Fade the rendered SID audio to silence before its playback limit.",
 +                advanced=True,
++                requires_reload=True,
 +            ),
 +        )
 +
