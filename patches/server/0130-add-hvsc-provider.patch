@@ -6,7 +6,8 @@ Add native support for Commodore 64 SID chiptunes from the High Voltage
 SID Collection (HVSC). Streams authentic hardware recordings (MOS 6581 R3 /
 MOS 6581 R4 / CSG 8580 R5) from SOASC mirrors, supports optional local
 emulation via sidplayfp, multi-subtune navigation, and catalog browsing
-by composer, classic top 100 tunes, and games.
+by composer, classic top 100 tunes, and games. Also includes adjustable stereo
+widening for local emulator playback.
 ---
 diff --git a/music_assistant/providers/hvsc/__init__.py b/music_assistant/providers/hvsc/__init__.py
 new file mode 100644
@@ -36,10 +37,10 @@ index 0000000..c24a127
 +    return HvscProvider(mass, manifest, config)
 diff --git a/music_assistant/providers/hvsc/audio_engine.py b/music_assistant/providers/hvsc/audio_engine.py
 new file mode 100644
-index 0000000..1010bfd
+index 0000000..a418e27
 --- /dev/null
 +++ b/music_assistant/providers/hvsc/audio_engine.py
-@@ -0,0 +1,156 @@
+@@ -0,0 +1,169 @@
 +"""Audio streaming and emulation engine for HVSC tracks."""
 +
 +from __future__ import annotations
@@ -56,9 +57,11 @@ index 0000000..1010bfd
 +from .constants import (
 +    DEFAULT_EMULATOR_CMD,
 +    DEFAULT_SOASC_BASE_URL,
++    DEFAULT_STEREO_WIDTH,
 +    AudioSourceMode,
 +    SidChipModel,
 +)
++from .stereo import widen_wav_stream
 +
 +LOGGER = logging.getLogger(__name__)
 +
@@ -73,6 +76,7 @@ index 0000000..1010bfd
 +        audio_mode: Any = AudioSourceMode.ONLINE,
 +        emulator_binary: Any = DEFAULT_EMULATOR_CMD,
 +        local_hvsc_path: Any = None,
++        stereo_width: Any = DEFAULT_STEREO_WIDTH,
 +    ) -> None:
 +        if hasattr(base_url, "value"):
 +            base_url = base_url.value or getattr(base_url, "default_value", DEFAULT_SOASC_BASE_URL)
@@ -99,6 +103,12 @@ index 0000000..1010bfd
 +        if hasattr(local_hvsc_path, "value"):
 +            local_hvsc_path = local_hvsc_path.value or getattr(local_hvsc_path, "default_value", None)
 +        self.local_hvsc_path = Path(local_hvsc_path) if local_hvsc_path else None
++        if hasattr(stereo_width, "value"):
++            stereo_width = stereo_width.value or getattr(stereo_width, "default_value", DEFAULT_STEREO_WIDTH)
++        try:
++            self.stereo_width = max(0, min(100, int(stereo_width)))
++        except (TypeError, ValueError):
++            self.stereo_width = DEFAULT_STEREO_WIDTH
 +
 +    def build_soasc_url(self, hvsc_path: str, subtune: int = 1) -> str:
 +        """Construct the direct SOASC MP3 URL for an HVSC track and subtune.
@@ -184,12 +194,16 @@ index 0000000..1010bfd
 +            stderr=asyncio.subprocess.DEVNULL,
 +        )
 +
-+        try:
++        async def read_audio() -> AsyncGenerator[bytes]:
 +            assert proc.stdout is not None
 +            while True:
 +                data = await proc.stdout.read(chunk_size)
 +                if not data:
 +                    break
++                yield data
++
++        try:
++            async for data in widen_wav_stream(read_audio(), self.stereo_width):
 +                yield data
 +        finally:
 +            if proc.returncode is None:
@@ -398,10 +412,10 @@ index 0000000..f0a210c
 +        }
 diff --git a/music_assistant/providers/hvsc/constants.py b/music_assistant/providers/hvsc/constants.py
 new file mode 100644
-index 0000000..15b015f
+index 0000000..969cd00
 --- /dev/null
 +++ b/music_assistant/providers/hvsc/constants.py
-@@ -0,0 +1,38 @@
+@@ -0,0 +1,40 @@
 +"""Constants for the High Voltage SID Collection (HVSC) provider."""
 +
 +from __future__ import annotations
@@ -418,12 +432,14 @@ index 0000000..15b015f
 +CONF_SOASC_URL = "soasc_url"
 +CONF_LOCAL_HVSC_PATH = "local_hvsc_path"
 +CONF_EMULATOR_CMD = "emulator_cmd"
++CONF_STEREO_WIDTH = "stereo_width"
 +CONF_DEFAULT_DURATION = "default_duration"
 +
 +# Defaults
 +DEFAULT_SOASC_BASE_URL = "https://mirror.accum.se/mirror/media/Oakvalley/soasc/hvsc/049/MP3"
 +DEFAULT_DURATION_SECONDS = 180
 +DEFAULT_EMULATOR_CMD = "sidplayfp"
++DEFAULT_STEREO_WIDTH = 0
 +
 +
 +class SidChipModel(str, Enum):
@@ -460,10 +476,10 @@ index 0000000..ac1ade5
 +}
 diff --git a/music_assistant/providers/hvsc/provider.py b/music_assistant/providers/hvsc/provider.py
 new file mode 100644
-index 0000000..9a4588f
+index 0000000..a1072da
 --- /dev/null
 +++ b/music_assistant/providers/hvsc/provider.py
-@@ -0,0 +1,485 @@
+@@ -0,0 +1,501 @@
 +"""Music Assistant Provider implementation for High Voltage SID Collection (HVSC)."""
 +
 +from __future__ import annotations
@@ -507,9 +523,11 @@ index 0000000..9a4588f
 +    CONF_LOCAL_HVSC_PATH,
 +    CONF_SID_CHIP,
 +    CONF_SOASC_URL,
++    CONF_STEREO_WIDTH,
 +    DEFAULT_DURATION_SECONDS,
 +    DEFAULT_EMULATOR_CMD,
 +    DEFAULT_SOASC_BASE_URL,
++    DEFAULT_STEREO_WIDTH,
 +)
 +
 +if TYPE_CHECKING:
@@ -598,6 +616,7 @@ index 0000000..9a4588f
 +            audio_mode=audio_mode,
 +            emulator_binary=emulator_cmd,
 +            local_hvsc_path=local_path,
++            stereo_width=self._get_config_value(CONF_STEREO_WIDTH, DEFAULT_STEREO_WIDTH),
 +        )
 +
 +    async def get_config_entries(
@@ -673,6 +692,19 @@ index 0000000..9a4588f
 +                default_value=DEFAULT_EMULATOR_CMD,
 +                description="Binary path or command for SID emulator (e.g. sidplayfp).",
 +                advanced=True,
++            ),
++            ConfigEntry(
++                key=CONF_STEREO_WIDTH,
++                type=ConfigEntryType.INTEGER,
++                label="Local Emulator Stereo Width",
++                default_value=DEFAULT_STEREO_WIDTH,
++                range=(0, 100),
++                description=(
++                    "Widen local emulator output with a filtered, delayed side signal. "
++                    "0 disables the effect; SOASC online streams are unchanged."
++                ),
++                advanced=True,
++                requires_reload=True,
 +            ),
 +            ConfigEntry(
 +                key=CONF_DEFAULT_DURATION,
@@ -1111,3 +1143,172 @@ index 0000000..ebe8438
 +            if times:
 +                lengths_db[key] = times
 +    return lengths_db
+diff --git a/music_assistant/providers/hvsc/stereo.py b/music_assistant/providers/hvsc/stereo.py
+new file mode 100644
+index 0000000..b8f5ead
+--- /dev/null
++++ b/music_assistant/providers/hvsc/stereo.py
+@@ -0,0 +1,163 @@
++"""Streaming stereo widening for PCM WAV emulator output."""
++
++from __future__ import annotations
++
++import math
++import struct
++from collections.abc import AsyncGenerator, AsyncIterable
++
++_FRAME_BYTES = 4  # 16-bit little-endian stereo PCM
++_WIDENING_HEADROOM = 0.66
++_MAX_SIDE_GAIN = 0.5
++_SIDE_DELAY_SECONDS = 0.008
++_HIGH_PASS_HZ = 150.0
++
++
++class _StereoWidener:
++    """Create a filtered, delayed side signal while preserving the dry center."""
++
++    def __init__(self, sample_rate: int, intensity: int) -> None:
++        amount = max(0, min(100, intensity)) / 100
++        self.side_gain = amount * _MAX_SIDE_GAIN
++        self.delay = [0.0] * max(1, round(sample_rate * _SIDE_DELAY_SECONDS))
++        self.delay_position = 0
++        self.dry_gain = _WIDENING_HEADROOM
++
++        omega = 2 * math.pi * min(_HIGH_PASS_HZ, sample_rate * 0.45) / sample_rate
++        cosine = math.cos(omega)
++        alpha = math.sin(omega) / math.sqrt(2)
++        a0 = 1 + alpha
++        self.b0 = (1 + cosine) / (2 * a0)
++        self.b1 = -(1 + cosine) / a0
++        self.b2 = self.b0
++        self.a1 = -2 * cosine / a0
++        self.a2 = (1 - alpha) / a0
++        self.x1 = self.x2 = self.y1 = self.y2 = 0.0
++
++    def process(self, pcm: bytes) -> bytes:
++        """Process complete stereo PCM frames."""
++        output = bytearray(len(pcm))
++        for offset in range(0, len(pcm), _FRAME_BYTES):
++            left, right = struct.unpack_from("<hh", pcm, offset)
++            mid = (left + right) * 0.5 / 32768
++            filtered = (
++                self.b0 * mid
++                + self.b1 * self.x1
++                + self.b2 * self.x2
++                - self.a1 * self.y1
++                - self.a2 * self.y2
++            )
++            self.x2, self.x1 = self.x1, mid
++            self.y2, self.y1 = self.y1, filtered
++
++            delayed = self.delay[self.delay_position]
++            self.delay[self.delay_position] = filtered
++            self.delay_position = (self.delay_position + 1) % len(self.delay)
++            side = delayed * self.side_gain * 32768
++
++            out_left = left * self.dry_gain + side
++            out_right = right * self.dry_gain - side
++            peak = max(abs(out_left), abs(out_right))
++            if peak > 32767:
++                # Scale both channels together so clipping cannot break the mono sum.
++                scale = 32767 / peak
++                out_left *= scale
++                out_right *= scale
++            struct.pack_into(
++                "<hh",
++                output,
++                offset,
++                max(-32768, min(32767, round(out_left))),
++                max(-32768, min(32767, round(out_right))),
++            )
++        return bytes(output)
++
++
++def _wav_data_header(data: bytes) -> tuple[int, int, bool] | None:
++    """Return the PCM data offset, sample rate and support flag when available."""
++    if len(data) < 12:
++        return None
++    if data[:4] != b"RIFF" or data[8:12] != b"WAVE":
++        return 0, 0, False
++
++    position = 12
++    audio_format = channels = bits_per_sample = sample_rate = None
++    while len(data) >= position + 8:
++        chunk_id, chunk_size = struct.unpack_from("<4sI", data, position)
++        content_offset = position + 8
++        if chunk_id == b"fmt ":
++            if chunk_size < 16:
++                return 0, 0, False
++            if len(data) < content_offset + 16:
++                return None
++            audio_format, channels, sample_rate = struct.unpack_from("<HHI", data, content_offset)
++            bits_per_sample = struct.unpack_from("<H", data, content_offset + 14)[0]
++        elif chunk_id == b"data":
++            supported = (
++                audio_format == 1
++                and channels == 2
++                and bits_per_sample == 16
++                and sample_rate is not None
++                and sample_rate > 0
++            )
++            return content_offset, sample_rate or 0, supported
++
++        next_position = content_offset + chunk_size + (chunk_size & 1)
++        if len(data) < next_position:
++            return None
++        position = next_position
++    return None
++
++
++async def widen_wav_stream(
++    chunks: AsyncIterable[bytes], intensity: int
++) -> AsyncGenerator[bytes]:
++    """Widen a streamed 16-bit stereo PCM WAV without buffering the whole track.
++
++    WAV headers and unsupported audio formats pass through unchanged. An intensity
++    of zero is a bit-perfect pass-through.
++    """
++    amount = max(0, min(100, int(intensity)))
++    if amount == 0:
++        async for chunk in chunks:
++            yield chunk
++        return
++
++    pending = bytearray()
++    widener: _StereoWidener | None = None
++    passthrough = False
++    async for chunk in chunks:
++        if passthrough:
++            yield chunk
++            continue
++
++        if widener is None:
++            pending.extend(chunk)
++            header = _wav_data_header(pending)
++            if header is None:
++                continue
++            data_offset, sample_rate, supported = header
++            if data_offset == 0 or not supported:
++                yield bytes(pending)
++                pending.clear()
++                passthrough = True
++                continue
++
++            yield bytes(pending[:data_offset])
++            audio = bytes(pending[data_offset:])
++            pending.clear()
++            widener = _StereoWidener(sample_rate, amount)
++        else:
++            audio = bytes(pending) + chunk
++            pending.clear()
++
++        complete_length = len(audio) - (len(audio) % _FRAME_BYTES)
++        if complete_length:
++            yield widener.process(audio[:complete_length])
++        if complete_length < len(audio):
++            pending.extend(audio[complete_length:])
++
++    if pending:
++        # A conforming stereo PCM stream ends on a frame boundary. Preserve any
++        # truncated trailing bytes rather than dropping or inventing audio data.
++        yield bytes(pending)
