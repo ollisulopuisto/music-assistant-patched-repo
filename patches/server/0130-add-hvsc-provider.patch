@@ -33,10 +33,10 @@ index 0000000..c24a127
 +    return HvscProvider(mass, manifest, config)
 diff --git a/music_assistant/providers/hvsc/audio_engine.py b/music_assistant/providers/hvsc/audio_engine.py
 new file mode 100644
-index 0000000..e073bdd
+index 0000000..8c6c2ee
 --- /dev/null
 +++ b/music_assistant/providers/hvsc/audio_engine.py
-@@ -0,0 +1,201 @@
+@@ -0,0 +1,231 @@
 +"""Fetch HVSC SID files and render them with the sidplayfp emulator."""
 +
 +from __future__ import annotations
@@ -44,6 +44,7 @@ index 0000000..e073bdd
 +import asyncio
 +import logging
 +import tempfile
++import wave
 +from collections.abc import AsyncGenerator
 +from contextlib import suppress
 +from pathlib import Path
@@ -54,11 +55,13 @@ index 0000000..e073bdd
 +
 +from .constants import (
 +    DEFAULT_EMULATOR_CMD,
++    DEFAULT_FADE_OUT_SECONDS,
 +    DEFAULT_HVSC_BASE_URL,
++    DEFAULT_SAMPLE_RATE,
 +    DEFAULT_STEREO_WIDTH,
 +    SidChipModel,
 +)
-+from .stereo import widen_wav_stream
++from .stereo import fade_wav_stream, widen_wav_stream
 +
 +LOGGER = logging.getLogger(__name__)
 +
@@ -73,6 +76,8 @@ index 0000000..e073bdd
 +        emulator_binary: Any = DEFAULT_EMULATOR_CMD,
 +        local_hvsc_path: Any = None,
 +        stereo_width: Any = DEFAULT_STEREO_WIDTH,
++        sample_rate: Any = DEFAULT_SAMPLE_RATE,
++        fade_out_seconds: Any = DEFAULT_FADE_OUT_SECONDS,
 +    ) -> None:
 +        if hasattr(base_url, "value"):
 +            base_url = base_url.value or getattr(
@@ -104,6 +109,26 @@ index 0000000..e073bdd
 +            self.stereo_width = max(0, min(100, int(stereo_width)))
 +        except (TypeError, ValueError):
 +            self.stereo_width = DEFAULT_STEREO_WIDTH
++        if hasattr(sample_rate, "value"):
++            sample_rate = sample_rate.value or getattr(
++                sample_rate, "default_value", DEFAULT_SAMPLE_RATE
++            )
++        try:
++            self.sample_rate = max(8000, int(sample_rate))
++        except (TypeError, ValueError):
++            self.sample_rate = DEFAULT_SAMPLE_RATE
++        try:
++            if hasattr(fade_out_seconds, "value"):
++                fade_out_seconds = (
++                    fade_out_seconds.value
++                    if fade_out_seconds.value is not None
++                    else getattr(
++                        fade_out_seconds, "default_value", DEFAULT_FADE_OUT_SECONDS
++                    )
++                )
++            self.fade_out_seconds = max(0, min(30, int(fade_out_seconds)))
++        except (TypeError, ValueError):
++            self.fade_out_seconds = DEFAULT_FADE_OUT_SECONDS
 +
 +    def build_sid_url(self, hvsc_path: str) -> str:
 +        """Build a safely escaped URL for the actual SID file in the HVSC mirror."""
@@ -132,7 +157,7 @@ index 0000000..e073bdd
 +            "--sidlite",
 +            model_flag,
 +            "-s",
-+            "-f44100",
++            f"-f{self.sample_rate}",
 +            "-p16",
 +            f"-o{subtune}",
 +            f"-t{duration_seconds}",
@@ -216,7 +241,12 @@ index 0000000..e073bdd
 +                    finally:
 +                        await asyncio.to_thread(rendered.close)
 +
-+                async for data in widen_wav_stream(read_audio(), self.stereo_width):
++                with wave.open(wav_path, "rb") as rendered:
++                    total_frames = rendered.getnframes()
++                widened = widen_wav_stream(read_audio(), self.stereo_width)
++                async for data in fade_wav_stream(
++                    widened, total_frames, self.fade_out_seconds
++                ):
 +                    yield data
 +            finally:
 +                if proc.returncode is None:
@@ -440,10 +470,10 @@ index 0000000..f0a210c
 +        }
 diff --git a/music_assistant/providers/hvsc/constants.py b/music_assistant/providers/hvsc/constants.py
 new file mode 100644
-index 0000000..832c011
+index 0000000..a0f204f
 --- /dev/null
 +++ b/music_assistant/providers/hvsc/constants.py
-@@ -0,0 +1,31 @@
+@@ -0,0 +1,34 @@
 +"""Constants for the High Voltage SID Collection (HVSC) provider."""
 +
 +from __future__ import annotations
@@ -461,12 +491,15 @@ index 0000000..832c011
 +CONF_EMULATOR_CMD = "emulator_cmd"
 +CONF_STEREO_WIDTH = "stereo_width"
 +CONF_DEFAULT_DURATION = "default_duration"
++CONF_FADE_OUT_DURATION = "fade_out_duration"
 +
 +# Defaults
 +DEFAULT_HVSC_BASE_URL = "https://ftp.modland.com/pub/modules/HVSC"
 +DEFAULT_DURATION_SECONDS = 180
 +DEFAULT_EMULATOR_CMD = "sidplayfp"
 +DEFAULT_STEREO_WIDTH = 0
++DEFAULT_SAMPLE_RATE = 44100
++DEFAULT_FADE_OUT_SECONDS = 4
 +
 +
 +class SidChipModel(str, Enum):
@@ -477,7 +510,7 @@ index 0000000..832c011
 +    CSG8580R5 = "CSG8580R5"  # Clean, sharp C64C / C64-II filter
 diff --git a/music_assistant/providers/hvsc/manifest.json b/music_assistant/providers/hvsc/manifest.json
 new file mode 100644
-index 0000000..ac1ade5
+index 0000000..2a5ff4c
 --- /dev/null
 +++ b/music_assistant/providers/hvsc/manifest.json
 @@ -0,0 +1,12 @@
@@ -491,14 +524,14 @@ index 0000000..ac1ade5
 +  "requirements": [],
 +  "documentation": "https://github.com/ollisulopuisto/hvsc-ma",
 +  "multi_instance": false,
-+  "icon": "chip"
++  "icon": "mdi:chip"
 +}
 diff --git a/music_assistant/providers/hvsc/provider.py b/music_assistant/providers/hvsc/provider.py
 new file mode 100644
-index 0000000..72f5050
+index 0000000..5709e32
 --- /dev/null
 +++ b/music_assistant/providers/hvsc/provider.py
-@@ -0,0 +1,468 @@
+@@ -0,0 +1,503 @@
 +"""Music Assistant Provider implementation for High Voltage SID Collection (HVSC)."""
 +
 +from __future__ import annotations
@@ -538,12 +571,14 @@ index 0000000..72f5050
 +from .constants import (
 +    CONF_DEFAULT_DURATION,
 +    CONF_EMULATOR_CMD,
++    CONF_FADE_OUT_DURATION,
 +    CONF_HVSC_URL,
 +    CONF_LOCAL_HVSC_PATH,
 +    CONF_SID_CHIP,
 +    CONF_STEREO_WIDTH,
 +    DEFAULT_DURATION_SECONDS,
 +    DEFAULT_EMULATOR_CMD,
++    DEFAULT_FADE_OUT_SECONDS,
 +    DEFAULT_HVSC_BASE_URL,
 +    DEFAULT_STEREO_WIDTH,
 +)
@@ -619,7 +654,12 @@ index 0000000..72f5050
 +        if val is None:
 +            return default
 +        if hasattr(val, "value"):
-+            val = val.value or getattr(val, "default_value", default)
++            configured_value = val.value
++            val = (
++                configured_value
++                if configured_value is not None
++                else getattr(val, "default_value", default)
++            )
 +        return val if val is not None else default
 +
 +    def _init_audio_engine(self) -> None:
@@ -636,6 +676,9 @@ index 0000000..72f5050
 +            local_hvsc_path=local_path,
 +            stereo_width=self._get_config_value(
 +                CONF_STEREO_WIDTH, DEFAULT_STEREO_WIDTH
++            ),
++            fade_out_seconds=self._get_config_value(
++                CONF_FADE_OUT_DURATION, DEFAULT_FADE_OUT_SECONDS
 +            ),
 +        )
 +
@@ -676,6 +719,7 @@ index 0000000..72f5050
 +                type=ConfigEntryType.STRING,
 +                label="Local HVSC Path",
 +                default_value="",
++                required=False,
 +                description="Optional path to local C64Music directory (for local file playback).",
 +                advanced=True,
 +            ),
@@ -705,8 +749,22 @@ index 0000000..72f5050
 +                type=ConfigEntryType.INTEGER,
 +                label="Default Track Duration (seconds)",
 +                default_value=DEFAULT_DURATION_SECONDS,
-+                description="Fallback duration in seconds for subtunes when song length is not specified.",
++                range=(30, 1800),
++                description=(
++                    "Playback limit used when no HVSC song length is available. "
++                    "Known song lengths from HVSC take precedence."
++                ),
 +                advanced=True,
++            ),
++            ConfigEntry(
++                key=CONF_FADE_OUT_DURATION,
++                type=ConfigEntryType.INTEGER,
++                label="Fade Out Duration (seconds)",
++                default_value=DEFAULT_FADE_OUT_SECONDS,
++                range=(0, 30),
++                description="Fade the rendered SID audio to silence before its playback limit.",
++                advanced=True,
++                requires_reload=True,
 +            ),
 +        )
 +
@@ -855,7 +913,7 @@ index 0000000..72f5050
 +        subtune = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 1
 +
 +        tune = self.catalog.get_tune(tune_id)
-+        duration = DEFAULT_DURATION_SECONDS
++        duration = self._default_track_duration()
 +        if tune and tune.durations and subtune <= len(tune.durations):
 +            duration = tune.durations[subtune - 1]
 +
@@ -869,7 +927,7 @@ index 0000000..72f5050
 +            item_id=item_id,
 +            audio_format=AudioFormat(
 +                content_type=ContentType.WAV,
-+                sample_rate=44100,
++                sample_rate=self.audio_engine.sample_rate,
 +                bit_depth=16,
 +                channels=2,
 +            ),
@@ -892,7 +950,7 @@ index 0000000..72f5050
 +        ):
 +            parts = streamdetails.item_id.split("#")
 +            subtune = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 1
-+            duration = streamdetails.duration or DEFAULT_DURATION_SECONDS
++            duration = streamdetails.duration or self._default_track_duration()
 +            if streamdetails.path.startswith(("http://", "https://")):
 +                async for chunk in self.audio_engine.stream_hvsc_audio(
 +                    streamdetails.item_id.split("#", 1)[0], subtune, duration
@@ -941,7 +999,7 @@ index 0000000..72f5050
 +        if tune.subtunes_count > 1:
 +            title = f"{tune.title} (Subtune {subtune})"
 +
-+        duration = DEFAULT_DURATION_SECONDS
++        duration = self._default_track_duration()
 +        if tune.durations and subtune <= len(tune.durations):
 +            duration = tune.durations[subtune - 1]
 +
@@ -967,6 +1025,16 @@ index 0000000..72f5050
 +                )
 +            },
 +        )
++
++    def _default_track_duration(self) -> int:
++        """Return the configured fallback playback limit for untimed tunes."""
++        value = self._get_config_value(
++            CONF_DEFAULT_DURATION, DEFAULT_DURATION_SECONDS
++        )
++        try:
++            return max(30, min(1800, int(value)))
++        except (TypeError, ValueError):
++            return DEFAULT_DURATION_SECONDS
 diff --git a/music_assistant/providers/hvsc/sid_parser.py b/music_assistant/providers/hvsc/sid_parser.py
 new file mode 100644
 index 0000000..ebe8438
