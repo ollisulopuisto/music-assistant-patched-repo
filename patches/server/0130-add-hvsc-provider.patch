@@ -528,16 +528,17 @@ index 0000000..2a5ff4c
 +}
 diff --git a/music_assistant/providers/hvsc/provider.py b/music_assistant/providers/hvsc/provider.py
 new file mode 100644
-index 0000000..5709e32
+index 0000000..72f5050
 --- /dev/null
 +++ b/music_assistant/providers/hvsc/provider.py
-@@ -0,0 +1,503 @@
+@@ -0,0 +1,516 @@
 +"""Music Assistant Provider implementation for High Voltage SID Collection (HVSC)."""
 +
 +from __future__ import annotations
 +
 +import logging
 +from collections.abc import AsyncGenerator, Sequence
++from datetime import datetime
 +from typing import TYPE_CHECKING, Any
 +
 +from music_assistant_models.config_entries import (
@@ -558,6 +559,7 @@ index 0000000..5709e32
 +    AudioFormat,
 +    BrowseFolder,
 +    ItemMapping,
++    MediaItemMetadata,
 +    MediaItemType,
 +    ProviderMapping,
 +    SearchResults,
@@ -1010,12 +1012,23 @@ index 0000000..5709e32
 +            media_type=MediaType.ARTIST,
 +        )
 +
++        release_date = None
++        year = tune.year.strip()
++        if len(year) >= 4 and year[:4].isdigit():
++            parsed_year = int(year[:4])
++            if 1000 <= parsed_year <= 9999:
++                release_date = datetime(parsed_year, 1, 1)
++
 +        return Track(
 +            item_id=track_id,
 +            provider=self.domain,
 +            name=title,
 +            duration=duration,
 +            artists=UniqueList([artist]),
++            metadata=MediaItemMetadata(
++                label=tune.publisher or None,
++                release_date=release_date,
++            ),
 +            track_number=subtune,
 +            provider_mappings={
 +                ProviderMapping(
