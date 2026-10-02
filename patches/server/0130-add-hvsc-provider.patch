@@ -33,10 +33,10 @@ index 0000000..c24a127
 +    return HvscProvider(mass, manifest, config)
 diff --git a/music_assistant/providers/hvsc/audio_engine.py b/music_assistant/providers/hvsc/audio_engine.py
 new file mode 100644
-index 0000000..e073bdd
+index 0000000..5763235
 --- /dev/null
 +++ b/music_assistant/providers/hvsc/audio_engine.py
-@@ -0,0 +1,201 @@
+@@ -0,0 +1,217 @@
 +"""Fetch HVSC SID files and render them with the sidplayfp emulator."""
 +
 +from __future__ import annotations
@@ -55,7 +55,9 @@ index 0000000..e073bdd
 +from .constants import (
 +    DEFAULT_EMULATOR_CMD,
 +    DEFAULT_HVSC_BASE_URL,
++    DEFAULT_SAMPLE_RATE,
 +    DEFAULT_STEREO_WIDTH,
++    SUPPORTED_SAMPLE_RATES,
 +    SidChipModel,
 +)
 +from .stereo import widen_wav_stream
@@ -73,6 +75,7 @@ index 0000000..e073bdd
 +        emulator_binary: Any = DEFAULT_EMULATOR_CMD,
 +        local_hvsc_path: Any = None,
 +        stereo_width: Any = DEFAULT_STEREO_WIDTH,
++        sample_rate: Any = DEFAULT_SAMPLE_RATE,
 +    ) -> None:
 +        if hasattr(base_url, "value"):
 +            base_url = base_url.value or getattr(
@@ -104,6 +107,19 @@ index 0000000..e073bdd
 +            self.stereo_width = max(0, min(100, int(stereo_width)))
 +        except (TypeError, ValueError):
 +            self.stereo_width = DEFAULT_STEREO_WIDTH
++        if hasattr(sample_rate, "value"):
++            sample_rate = sample_rate.value or getattr(
++                sample_rate, "default_value", DEFAULT_SAMPLE_RATE
++            )
++        try:
++            sample_rate = int(sample_rate)
++        except (TypeError, ValueError):
++            sample_rate = DEFAULT_SAMPLE_RATE
++        self.sample_rate = (
++            sample_rate
++            if sample_rate in SUPPORTED_SAMPLE_RATES
++            else DEFAULT_SAMPLE_RATE
++        )
 +
 +    def build_sid_url(self, hvsc_path: str) -> str:
 +        """Build a safely escaped URL for the actual SID file in the HVSC mirror."""
@@ -132,7 +148,7 @@ index 0000000..e073bdd
 +            "--sidlite",
 +            model_flag,
 +            "-s",
-+            "-f44100",
++            f"-f{self.sample_rate}",
 +            "-p16",
 +            f"-o{subtune}",
 +            f"-t{duration_seconds}",
@@ -440,10 +456,10 @@ index 0000000..f0a210c
 +        }
 diff --git a/music_assistant/providers/hvsc/constants.py b/music_assistant/providers/hvsc/constants.py
 new file mode 100644
-index 0000000..832c011
+index 0000000..86a1b3c
 --- /dev/null
 +++ b/music_assistant/providers/hvsc/constants.py
-@@ -0,0 +1,31 @@
+@@ -0,0 +1,34 @@
 +"""Constants for the High Voltage SID Collection (HVSC) provider."""
 +
 +from __future__ import annotations
@@ -460,6 +476,7 @@ index 0000000..832c011
 +CONF_LOCAL_HVSC_PATH = "local_hvsc_path"
 +CONF_EMULATOR_CMD = "emulator_cmd"
 +CONF_STEREO_WIDTH = "stereo_width"
++CONF_SAMPLE_RATE = "sample_rate"
 +CONF_DEFAULT_DURATION = "default_duration"
 +
 +# Defaults
@@ -467,6 +484,8 @@ index 0000000..832c011
 +DEFAULT_DURATION_SECONDS = 180
 +DEFAULT_EMULATOR_CMD = "sidplayfp"
 +DEFAULT_STEREO_WIDTH = 0
++DEFAULT_SAMPLE_RATE = 48000
++SUPPORTED_SAMPLE_RATES = (44100, 48000, 96000)
 +
 +
 +class SidChipModel(str, Enum):
@@ -477,7 +496,7 @@ index 0000000..832c011
 +    CSG8580R5 = "CSG8580R5"  # Clean, sharp C64C / C64-II filter
 diff --git a/music_assistant/providers/hvsc/manifest.json b/music_assistant/providers/hvsc/manifest.json
 new file mode 100644
-index 0000000..ac1ade5
+index 0000000..2a5ff4c
 --- /dev/null
 +++ b/music_assistant/providers/hvsc/manifest.json
 @@ -0,0 +1,12 @@
@@ -491,14 +510,14 @@ index 0000000..ac1ade5
 +  "requirements": [],
 +  "documentation": "https://github.com/ollisulopuisto/hvsc-ma",
 +  "multi_instance": false,
-+  "icon": "chip"
++  "icon": "mdi:chip"
 +}
 diff --git a/music_assistant/providers/hvsc/provider.py b/music_assistant/providers/hvsc/provider.py
 new file mode 100644
-index 0000000..72f5050
+index 0000000..32ff125
 --- /dev/null
 +++ b/music_assistant/providers/hvsc/provider.py
-@@ -0,0 +1,468 @@
+@@ -0,0 +1,489 @@
 +"""Music Assistant Provider implementation for High Voltage SID Collection (HVSC)."""
 +
 +from __future__ import annotations
@@ -540,12 +559,15 @@ index 0000000..72f5050
 +    CONF_EMULATOR_CMD,
 +    CONF_HVSC_URL,
 +    CONF_LOCAL_HVSC_PATH,
++    CONF_SAMPLE_RATE,
 +    CONF_SID_CHIP,
 +    CONF_STEREO_WIDTH,
 +    DEFAULT_DURATION_SECONDS,
 +    DEFAULT_EMULATOR_CMD,
 +    DEFAULT_HVSC_BASE_URL,
++    DEFAULT_SAMPLE_RATE,
 +    DEFAULT_STEREO_WIDTH,
++    SUPPORTED_SAMPLE_RATES,
 +)
 +
 +if TYPE_CHECKING:
@@ -637,6 +659,7 @@ index 0000000..72f5050
 +            stereo_width=self._get_config_value(
 +                CONF_STEREO_WIDTH, DEFAULT_STEREO_WIDTH
 +            ),
++            sample_rate=self._get_config_value(CONF_SAMPLE_RATE, DEFAULT_SAMPLE_RATE),
 +        )
 +
 +    async def get_config_entries(
@@ -676,6 +699,7 @@ index 0000000..72f5050
 +                type=ConfigEntryType.STRING,
 +                label="Local HVSC Path",
 +                default_value="",
++                required=False,
 +                description="Optional path to local C64Music directory (for local file playback).",
 +                advanced=True,
 +            ),
@@ -696,6 +720,22 @@ index 0000000..72f5050
 +                description=(
 +                    "Widen rendered SID audio with a high-passed, 8 ms delayed side signal. "
 +                    "0 disables the effect; higher values increase its intensity."
++                ),
++                advanced=True,
++                requires_reload=True,
++            ),
++            ConfigEntry(
++                key=CONF_SAMPLE_RATE,
++                type=ConfigEntryType.INTEGER,
++                label="SID Render Sample Rate",
++                default_value=DEFAULT_SAMPLE_RATE,
++                options=[
++                    ConfigValueOption(rate, f"{rate / 1000:g} kHz")
++                    for rate in SUPPORTED_SAMPLE_RATES
++                ],
++                description=(
++                    "Output sample rate for the rendered SID audio. Higher rates "
++                    "increase bandwidth and processing without adding source detail."
 +                ),
 +                advanced=True,
 +                requires_reload=True,
@@ -869,7 +909,7 @@ index 0000000..72f5050
 +            item_id=item_id,
 +            audio_format=AudioFormat(
 +                content_type=ContentType.WAV,
-+                sample_rate=44100,
++                sample_rate=self.audio_engine.sample_rate,
 +                bit_depth=16,
 +                channels=2,
 +            ),
