@@ -29,6 +29,7 @@ https://github.com/ollisulopuisto/music-assistant-patched-repo
 | `patches/server/0120-dsd-multichannel-pcm.patch` | Preserves multichannel PCM for capable players, standardizes six-channel PCM as 5.1(side), retains stereo output, and converts DSD to PCM |
 | `patches/server/0121-dff-dsd-marker.patch` | Routes DFF and DST sources through the DSD buffer sizing path |
 | `patches/server/0122-preserve-dsd-stereo-downmix.patch` | Keeps stereo downmix gain consistent when multichannel DSD passes through the shared buffer |
+| `patches/server/0130-add-hvsc-provider.patch` | Adds browsing and playback for the High Voltage SID Collection, including SOASC streams and optional local SID emulation |
 | `patches/frontend/0001-forbid-forms.patch` | Stops provider metadata rendering form controls (a feed-supplied `<form>` was a working phishing box) |
 | `patches/frontend/0002-show-notes.patch` | Shows an episode's notes in the list subtitle and in the fullscreen player's side panel, where lyrics go |
 | `patches/frontend/0003-alphabet-jump.patch` | Puts an A-Z strip above every library listing, so a big library is reachable without scrolling through it |
