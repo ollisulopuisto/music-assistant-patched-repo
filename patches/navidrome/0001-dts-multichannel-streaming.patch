@@ -1,0 +1,314 @@
+diff --git a/adapters/gotaglib/dts_multichannel_test.go b/adapters/gotaglib/dts_multichannel_test.go
+new file mode 100644
+index 0000000..f8032f4
+--- /dev/null
++++ b/adapters/gotaglib/dts_multichannel_test.go
+@@ -0,0 +1,84 @@
++package gotaglib
++
++import (
++	"context"
++	"os"
++	"path/filepath"
++	"testing"
++
++	"github.com/navidrome/navidrome/core/ffmpeg"
++)
++
++func TestParseDTSUsesProbedAudioPropertiesAndKeepsTags(t *testing.T) {
++	dir := t.TempDir()
++	fixture, err := os.ReadFile("../../tests/fixtures/test.wav")
++	if err != nil {
++		t.Fatal(err)
++	}
++	const name = "multichannel.wav.dts"
++	if err := os.WriteFile(filepath.Join(dir, name), fixture, 0o600); err != nil {
++		t.Fatal(err)
++	}
++
++	// Confirm the reproducer: TagLib succeeds but sees the WAV fixture's mono
++	// properties. DTS-in-WAV tracks have the same misleading successful parse.
++	e := extractor{fs: os.DirFS(dir), baseDir: dir}
++	initial, err := e.extractMetadata(name)
++	if err != nil {
++		t.Fatalf("TagLib precondition: %v", err)
++	}
++	if initial.AudioProperties.Channels != 1 {
++		t.Fatalf("TagLib precondition: expected mono WAV properties, got %d channels", initial.AudioProperties.Channels)
++	}
++
++	e.probeAudioStream = func(_ context.Context, path string) (*ffmpeg.AudioProbeResult, error) {
++		if path != filepath.Join(dir, name) {
++			t.Errorf("ffprobe path = %q", path)
++		}
++		return &ffmpeg.AudioProbeResult{
++			Codec: "dts", Channels: 6, SampleRate: 44100, BitDepth: 16, BitRate: 1411,
++		}, nil
++	}
++	parsed, err := e.Parse(name)
++	if err != nil {
++		t.Fatal(err)
++	}
++	info, ok := parsed[name]
++	if !ok {
++		t.Fatal("DTS track was omitted")
++	}
++	if info.AudioProperties.Codec != "dts" || info.AudioProperties.Channels != 6 || info.AudioProperties.SampleRate != 44100 {
++		t.Errorf("audio properties = %+v, want DTS 6ch/44100Hz", info.AudioProperties)
++	}
++	if got := info.Tags["title"]; len(got) != 1 || got[0] != "Title" {
++		t.Errorf("title tags = %v, want TagLib title preserved", got)
++	}
++	if got := info.Tags["album"]; len(got) != 1 || got[0] != "Album" {
++		t.Errorf("album tags = %v, want TagLib album preserved", got)
++	}
++}
++
++func TestParseDTSRejectsNonDTSPayload(t *testing.T) {
++	dir := t.TempDir()
++	fixture, err := os.ReadFile("../../tests/fixtures/test.wav")
++	if err != nil {
++		t.Fatal(err)
++	}
++	const name = "misnamed.wav.dts"
++	if err := os.WriteFile(filepath.Join(dir, name), fixture, 0o600); err != nil {
++		t.Fatal(err)
++	}
++	e := extractor{
++		fs: os.DirFS(dir), baseDir: dir,
++		probeAudioStream: func(context.Context, string) (*ffmpeg.AudioProbeResult, error) {
++			return &ffmpeg.AudioProbeResult{Codec: "pcm_s16le", Channels: 1}, nil
++		},
++	}
++	parsed, err := e.Parse(name)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if len(parsed) != 0 {
++		t.Errorf("misnamed non-DTS file should be omitted, got %#v", parsed)
++	}
++}
+diff --git a/adapters/gotaglib/gotaglib.go b/adapters/gotaglib/gotaglib.go
+index 7ea98a4..8abba2e 100644
+--- a/adapters/gotaglib/gotaglib.go
++++ b/adapters/gotaglib/gotaglib.go
+@@ -12,29 +12,48 @@
+ package gotaglib
+ 
+ import (
++	"context"
+ 	"errors"
+ 	"fmt"
+ 	"io"
+ 	"io/fs"
++	"path/filepath"
+ 	"runtime/debug"
+ 	"strings"
+ 	"time"
+ 
+ 	"github.com/navidrome/navidrome/conf"
++	"github.com/navidrome/navidrome/core/ffmpeg"
+ 	"github.com/navidrome/navidrome/core/storage/local"
+ 	"github.com/navidrome/navidrome/log"
++	"github.com/navidrome/navidrome/model"
+ 	"github.com/navidrome/navidrome/model/metadata"
+ 	"go.senan.xyz/taglib"
+ )
+ 
+ type extractor struct {
+-	fs fs.FS
++	fs               fs.FS
++	baseDir          string
++	probeAudioStream func(context.Context, string) (*ffmpeg.AudioProbeResult, error)
+ }
+ 
+ func (e extractor) Parse(files ...string) (map[string]metadata.Info, error) {
+ 	results := make(map[string]metadata.Info)
+ 	for _, path := range files {
+ 		props, err := e.extractMetadata(path)
++		if strings.EqualFold(filepath.Ext(path), ".dts") {
++			var dtsProps *metadata.Info
++			dtsProps, err = e.extractDTSProperties(path)
++			if err == nil {
++				if props == nil {
++					props = dtsProps
++				} else {
++					// TagLib can open DTS-in-WAV files but reports their generic WAV
++					// properties (often stereo). ffprobe knows the actual bitstream.
++					props.AudioProperties = dtsProps.AudioProperties
++				}
++			}
++		}
+ 		if err != nil {
+ 			continue
+ 		}
+@@ -43,6 +62,42 @@ func (e extractor) Parse(files ...string) (map[string]metadata.Info, error) {
+ 	return results, nil
+ }
+ 
++// extractDTSProperties handles raw DTS elementary streams, which carry no
++// standard tags and are not readable by TagLib. The source itself remains
++// untouched; ffprobe supplies only the technical properties used for catalog
++// display and stream negotiation.
++func (e extractor) extractDTSProperties(filePath string) (*metadata.Info, error) {
++	fullPath := filepath.Join(e.baseDir, filepath.FromSlash(filePath))
++	probeFn := e.probeAudioStream
++	if probeFn == nil {
++		probeFn = ffmpeg.New().ProbeAudioStream
++	}
++	probe, err := probeFn(context.Background(), fullPath)
++	if err != nil {
++		log.Warn("gotaglib: ffprobe could not inspect DTS file", "filePath", filePath, err)
++		return nil, err
++	}
++	if !strings.EqualFold(probe.Codec, "dts") || probe.Channels < 1 {
++		return nil, fmt.Errorf("gotaglib: %q has .dts extension but ffprobe found codec %q with %d channels", filePath, probe.Codec, probe.Channels)
++	}
++	baseName := strings.TrimSuffix(filepath.Base(filePath), filepath.Ext(filePath))
++	album := filepath.Base(filepath.Dir(filePath))
++	return &metadata.Info{
++		Tags: model.RawTags{
++			"title": {baseName},
++			"album": {album},
++		},
++		AudioProperties: metadata.AudioProperties{
++			Duration:   time.Duration(probe.Duration * float64(time.Second)),
++			BitRate:    probe.BitRate,
++			BitDepth:   probe.BitDepth,
++			SampleRate: probe.SampleRate,
++			Channels:   probe.Channels,
++			Codec:      probe.Codec,
++		},
++	}, nil
++}
++
+ func (e extractor) Version() string {
+ 	bi, ok := debug.ReadBuildInfo()
+ 	if ok {
+@@ -293,7 +348,7 @@ var _ local.Extractor = (*extractor)(nil)
+ 
+ func init() {
+ 	local.RegisterExtractor("taglib", func(fsys fs.FS, baseDir string) local.Extractor {
+-		return &extractor{fsys}
++		return &extractor{fs: fsys, baseDir: baseDir}
+ 	})
+ 	conf.AddHook(func() {
+ 		log.Debug("go-taglib version", "version", extractor{}.Version())
+diff --git a/core/ffmpeg/ffmpeg.go b/core/ffmpeg/ffmpeg.go
+index cc38dd9..1ac5abc 100644
+--- a/core/ffmpeg/ffmpeg.go
++++ b/core/ffmpeg/ffmpeg.go
+@@ -37,12 +37,13 @@ type TranscodeOptions struct {
+ 
+ // AudioProbeResult contains authoritative audio stream properties from ffprobe.
+ type AudioProbeResult struct {
+-	Codec      string `json:"codec"`
+-	Profile    string `json:"profile,omitempty"`
+-	BitRate    int    `json:"bitRate"`
+-	SampleRate int    `json:"sampleRate"`
+-	BitDepth   int    `json:"bitDepth"`
+-	Channels   int    `json:"channels"`
++	Codec      string  `json:"codec"`
++	Profile    string  `json:"profile,omitempty"`
++	BitRate    int     `json:"bitRate"`
++	SampleRate int     `json:"sampleRate"`
++	BitDepth   int     `json:"bitDepth"`
++	Channels   int     `json:"channels"`
++	Duration   float64 `json:"durationSeconds,omitempty"`
+ }
+ 
+ type FFmpeg interface {
+@@ -247,7 +248,8 @@ type probeOutput struct {
+ }
+ 
+ type probeFormat struct {
+-	BitRate string `json:"bit_rate"`
++	BitRate  string `json:"bit_rate"`
++	Duration string `json:"duration"`
+ }
+ 
+ type probeStream struct {
+@@ -259,6 +261,7 @@ type probeStream struct {
+ 	Channels         int    `json:"channels"`
+ 	BitsPerSample    int    `json:"bits_per_sample"`
+ 	BitsPerRawSample string `json:"bits_per_raw_sample"`
++	Duration         string `json:"duration"`
+ }
+ 
+ func parseProbeOutput(data []byte) (*AudioProbeResult, error) {
+@@ -280,6 +283,13 @@ func parseProbeOutput(data []byte) (*AudioProbeResult, error) {
+ 			Channels: s.Channels,
+ 			BitDepth: bitDepth,
+ 		}
++		duration := s.Duration
++		if duration == "" {
++			duration = output.Format.Duration
++		}
++		if duration != "" {
++			result.Duration, _ = strconv.ParseFloat(duration, 64)
++		}
+ 
+ 		// Profile: "unknown" → empty
+ 		if s.Profile != "" && !strings.EqualFold(s.Profile, "unknown") {
+diff --git a/core/stream/decider.go b/core/stream/decider.go
+index 8868982..9939d0f 100644
+--- a/core/stream/decider.go
++++ b/core/stream/decider.go
+@@ -259,8 +259,12 @@ func (s *deciderService) computeTranscodedStream(ctx context.Context, src *Detai
+ 
+ 	targetIsLossless := isLosslessFormat(targetFormat)
+ 
+-	// Reject lossy to lossless conversion
+-	if !src.IsLossless && targetIsLossless {
++	// DTS is lossy, but FLAC can be useful as a lossless transport for its
++	// decoded multichannel PCM when a playback client cannot handle a raw DTS
++	// elementary stream. This preserves the decoded samples, not the original
++	// DTS bitstream or information discarded by DTS encoding.
++	if !src.IsLossless && targetIsLossless &&
++		!(strings.EqualFold(src.Codec, "dts") && strings.EqualFold(targetFormat, "flac")) {
+ 		log.Trace(ctx, "Skipping transcoding profile: lossy to lossless not allowed", "targetFormat", targetFormat)
+ 		return nil, ""
+ 	}
+@@ -385,7 +389,7 @@ func (s *deciderService) computeBitrate(ctx context.Context, src *Details, targe
+ 				return false
+ 			}
+ 		}
+-	} else {
++	} else if !(strings.EqualFold(src.Codec, "dts") && strings.EqualFold(targetFormat, "flac")) {
+ 		ts.Bitrate = src.Bitrate
+ 	}
+ 
+diff --git a/model/file_types_test.go b/model/file_types_test.go
+index 93301e1..5889699 100644
+--- a/model/file_types_test.go
++++ b/model/file_types_test.go
+@@ -18,6 +18,10 @@ var _ = Describe("File Types()", func() {
+ 			Expect(model.IsAudioFile("test.flac")).To(BeTrue())
+ 		})
+ 
++		It("returns true for a DTS file", func() {
++			Expect(model.IsAudioFile("test.dts")).To(BeTrue())
++		})
++
+ 		It("returns false for a non-audio file", func() {
+ 			Expect(model.IsAudioFile("test.jpg")).To(BeFalse())
+ 		})
+diff --git a/resources/mime_types.yaml b/resources/mime_types.yaml
+index 18a2c22..31cb213 100644
+--- a/resources/mime_types.yaml
++++ b/resources/mime_types.yaml
+@@ -16,6 +16,7 @@ types:
+   .m4b: audio/mp4 
+   .flac: audio/flac 
+   .wav: audio/x-wav 
++  .dts: audio/vnd.dts
+   .wma: audio/x-ms-wma 
+   .ape: audio/x-monkeys-audio 
+   .mpc: audio/x-musepack 
+@@ -51,4 +52,4 @@ lossless:
+   - .wv
+   - .wvp
+   - .tak
+-  - .wav
+\ No newline at end of file
++  - .wav
