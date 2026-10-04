@@ -9,3 +9,6 @@ __pycache__/
 *.backup
 *.swp
 *.swo
+
+# Local-only scratch (screenshots, debug captures); never commit
+.local/

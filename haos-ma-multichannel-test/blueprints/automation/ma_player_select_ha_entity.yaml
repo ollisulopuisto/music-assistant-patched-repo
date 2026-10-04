@@ -1,0 +1,101 @@
+blueprint:
+  name: Select an HA input when an MA player starts
+  description: >-
+    When a selected Music Assistant media player starts playback, set a
+    Home Assistant input_select/select option or media-player source. Create
+    one automation per MA player and choose the target entity and matching
+    option for that speaker.
+  domain: automation
+  input:
+    ma_player:
+      name: Music Assistant player
+      description: The MA speaker/player whose playback should trigger this automation.
+      selector:
+        entity:
+          filter:
+            - domain: media_player
+    ha_target:
+      name: Home Assistant selector or player
+      description: An input_select, select, or media_player entity to control.
+      selector:
+        entity:
+          filter:
+            - domain: input_select
+            - domain: select
+            - domain: media_player
+    target_value:
+      name: Option or source to select
+      description: Exact input_select/select option or media-player source name.
+      selector:
+        text:
+    playing_delay:
+      name: Stable playing time
+      description: Require playback to remain active this long before switching.
+      default: 2
+      selector:
+        number:
+          min: 0
+          max: 30
+          unit_of_measurement: seconds
+          mode: slider
+
+mode: single
+
+trigger:
+  - trigger: state
+    entity_id: !input ma_player
+    to: playing
+    for:
+      seconds: !input playing_delay
+
+variables:
+  target_entity: !input ha_target
+  requested_value: !input target_value
+
+action:
+  - variables:
+      target_domain: "{{ target_entity.split('.')[0] }}"
+      current_value: >-
+        {% if target_entity.startswith('media_player.') %}
+          {{ state_attr(target_entity, 'source') }}
+        {% else %}
+          {{ states(target_entity) }}
+        {% endif %}
+      available_values: >-
+        {% if target_entity.startswith('media_player.') %}
+          {{ state_attr(target_entity, 'source_list') or [] }}
+        {% else %}
+          {{ state_attr(target_entity, 'options') or [] }}
+        {% endif %}
+  - condition: template
+    value_template: >-
+      {{ current_value != requested_value
+         and (not available_values or requested_value in available_values) }}
+  - choose:
+      - conditions:
+          - condition: template
+            value_template: "{{ target_domain == 'media_player' }}"
+        sequence:
+          - action: media_player.select_source
+            target:
+              entity_id: !input ha_target
+            data:
+              source: !input target_value
+      - conditions:
+          - condition: template
+            value_template: "{{ target_domain == 'input_select' }}"
+        sequence:
+          - action: input_select.select_option
+            target:
+              entity_id: !input ha_target
+            data:
+              option: !input target_value
+      - conditions:
+          - condition: template
+            value_template: "{{ target_domain == 'select' }}"
+        sequence:
+          - action: select.select_option
+            target:
+              entity_id: !input ha_target
+            data:
+              option: !input target_value
