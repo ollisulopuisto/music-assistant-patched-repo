@@ -47,8 +47,11 @@ on:
     # the no-op guard below only exempts scheduled runs - so a workflow edit would
     # publish a new version that is byte-identical to the last. Use the manual
     # dispatch, with force, when a workflow change really does need a rebuild.
+    # Only the patch sets baked into the image; patches/navidrome is for a
+    # different server and must not republish the add-on.
     paths:
-      - "patches/**"
+      - "patches/server/**"
+      - "patches/frontend/**"
 
 permissions:
   contents: write
@@ -415,6 +418,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+        with:
+          # full history, so the rebase before the push below has a merge base
+          fetch-depth: 0
 
       - uses: docker/login-action@v4
         with:
@@ -479,7 +485,16 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add "$ADDON_CONFIG" "$(dirname "$ADDON_CONFIG")/CHANGELOG.md"
           git commit -m "Publish $VERSION (upstream $SERVER_REF)"
-          git push
+          # main can move during the ~15 minute build (a docs push, a merged PR).
+          # The image is already published by now, so a rejected push would leave
+          # the add-on pointing at the previous version. Rebase onto whatever
+          # landed meanwhile; this commit only touches the add-on's own files.
+          for attempt in 1 2 3; do
+            git pull --rebase origin main && git push origin HEAD:main && exit 0
+            echo "push attempt $attempt rejected; retrying" >&2
+            sleep $((attempt * 5))
+          done
+          exit 1
 
   report-failure:
     name: Report a broken build
