@@ -1,0 +1,45 @@
+Subject: [PATCH] Test MPD high-resolution multichannel settings
+
+diff --git a/tests/controllers/config/test_config_protocol_defaults.py b/tests/controllers/config/test_config_protocol_defaults.py
+--- a/tests/controllers/config/test_config_protocol_defaults.py
++++ b/tests/controllers/config/test_config_protocol_defaults.py
+@@ -21,11 +21,14 @@ from unittest.mock import AsyncMock, MagicMock
+ from music_assistant_models.enums import PlayerFeature, PlayerType, ProviderType
+ 
+ from music_assistant.constants import (
+     CONF_FLOW_MODE_SAMPLE_RATE,
++    CONF_OUTPUT_CHANNELS,
+     CONF_PREFER_WAV_FOR_LIVE_SOURCES,
+     CONF_PROTOCOL_KEY_SPLITTER,
++    CONF_SAMPLE_RATES,
+     FLOW_MODE_SAMPLE_RATE_BIT_PERFECT,
+     FLOW_MODE_SAMPLE_RATE_SMART,
++    MULTI_VALUE_SPLITTER,
+ )
+ from music_assistant.mass import MusicAssistant
+ from music_assistant.models.player import DeviceInfo, LinkedOutputProtocol, Player
+@@ -252,2 +252,24 @@ async def test_live_source_wav_preference_is_only_exposed_for_http_players(
+ 
+     assert CONF_PREFER_WAV_FOR_LIVE_SOURCES not in {entry.key for entry in entries}
++
++
++async def test_mpd_player_exposes_multichannel_and_hires_settings(
++    mass: MusicAssistant,
++) -> None:
++    """MPD exposes surround output and lets MA target the Mac HDMI device's rates."""
++    mpd_provider = _TestProvider(mass, "mpd")
++    mass._providers[mpd_provider.instance_id] = mpd_provider  # type: ignore[assignment]
++    mass._provider_manifests[mpd_provider.domain] = mpd_provider.manifest
++    mpd_player = _TestPlayer(mpd_provider, "mpd_denon", "Denon via MPD", PlayerType.PLAYER)
++
++    entries = {
++        entry.key: entry for entry in await mass.config._get_player_config_entries(mpd_player)
++    }
++
++    output_channels = entries[CONF_OUTPUT_CHANNELS]
++    assert "multichannel" in {option.value for option in output_channels.options or []}
++
++    sample_rates = entries[CONF_SAMPLE_RATES]
++    sample_rate_options = {option.value for option in sample_rates.options or []}
++    assert f"96000{MULTI_VALUE_SPLITTER}24" in sample_rate_options
++    assert f"192000{MULTI_VALUE_SPLITTER}24" in sample_rate_options

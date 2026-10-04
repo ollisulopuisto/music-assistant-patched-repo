@@ -296,9 +296,12 @@ jobs:
         working-directory: source
         run: |
           set -euo pipefail
-          # These modules contain the regression coverage carried by patches 0120–0122.
+          # These cases contain the regression coverage carried by patches 0120–0123.
           # Keep them in the publish gate so a patch that applies but breaks its behavior
           # cannot produce a new add-on image.
+          python -m pytest -q \
+            tests/controllers/config/test_config_protocol_defaults.py \
+            -k test_mpd_player_exposes_multichannel_and_hires_settings
           python -m pytest -q \
             tests/controllers/streams/test_audio_analysis_controller.py \
             tests/controllers/streams/test_audio_buffer.py \
