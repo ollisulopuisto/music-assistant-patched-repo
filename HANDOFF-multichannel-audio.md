@@ -125,6 +125,10 @@ mpc clear && mpc add 5.1-spoken-channel-identification.flac && mpc play
 
 ## 7. MPV Bridge — 2026-09-28 overnight check
 
+> **Superseded 2026-10-04:** the prototype `native-mpv-bridge/` was removed from this
+> repo. The bridge now lives in its own repo, `~/Documents/koodi/ma-mpv-player`, and
+> runs as a LaunchAgent on the Mac (port 6601). The notes below are historical.
+
 The local MPV → CoreAudio route played the 96 kHz/24-bit 5.1 Bob Marley file cleanly.
 To let MA control that route, `native-mpv-bridge/bridge.py` now exposes the MPD
 commands MA uses and drives MPV over its private Unix IPC socket. The bridge was
