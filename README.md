@@ -172,3 +172,12 @@ does not.
 - It does **not** give Audiobookshelf access to storage that Home Assistant
   cannot already see. A drive attached to some other machine still has to be
   mounted — Settings → System → Storage, or passed through to the VM.
+
+## License
+
+Apache-2.0, matching Music Assistant upstream; see [LICENSE](LICENSE). The
+exceptions are patches to GPL projects, which carry their upstream's license:
+
+- `patches/navidrome/`: GPL-3.0 (Navidrome)
+- `native-mpd/patches/`: GPL-2.0-or-later (MPD)
+

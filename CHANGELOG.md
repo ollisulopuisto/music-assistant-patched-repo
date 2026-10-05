@@ -10,6 +10,8 @@ which the build writes.
 
 Repository and tooling only; none of this changes the add-on image.
 
+- Licensed under Apache-2.0 (matching upstream). Patches to Navidrome stay GPL-3.0
+  and patches to MPD stay GPL-2.0-or-later, as derivative works.
 - Navidrome patch for serving DTS multichannel files with correct metadata
   (`patches/navidrome/`).
 - The publish build now rebases before pushing the version bump, so a push to
