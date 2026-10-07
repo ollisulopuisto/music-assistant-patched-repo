@@ -1,0 +1,246 @@
+From 61a3c156d2ebb8267e21acff091cac363c608471 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 8 Oct 2026 01:38:29 +0300
+Subject: [PATCH] Let a layout file drop duplicate recommendation rows, hide
+ rows and order them
+
+The Discover page shows every source's rows interleaved, one per source per pass,
+and there is no say over which rows exist or which come first. With a Subsonic
+server and the library plugin both enabled the same row appears twice ("New
+Albums" next to "Recently Added Albums": both carry the translation key
+recently_added_albums), and the Last.fm and trending rows crowd out the
+library's own.
+
+recommendations_layout.json in the data directory takes that over, read on every
+request so an edit applies without a restart:
+
+  dedupe  keep one row per translation key, the library's own by preference
+          (on unless switched off, since a row twice is never wanted)
+  hide    patterns for rows not to offer at all
+  order   patterns for rows to put first, in that order; the rest keep their
+          interleaved order after them
+
+A pattern is a case-insensitive fnmatch against provider:item_id, item_id,
+translation_key and name:<row name>. A missing or malformed file changes nothing
+but the dedupe. The helper has no imports from the server, so its test loads it
+by path and runs without the server's dependencies.
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ .../music/recommendations/controller.py       |  5 +-
+ .../music/recommendations/layout.py           | 94 +++++++++++++++++++
+ .../music/test_recommendations_layout.py      | 78 +++++++++++++++
+ 3 files changed, 176 insertions(+), 1 deletion(-)
+ create mode 100644 music_assistant/controllers/music/recommendations/layout.py
+ create mode 100644 tests/controllers/music/test_recommendations_layout.py
+
+diff --git a/music_assistant/controllers/music/recommendations/controller.py b/music_assistant/controllers/music/recommendations/controller.py
+index a5b8b69..c8baf33 100644
+--- a/music_assistant/controllers/music/recommendations/controller.py
++++ b/music_assistant/controllers/music/recommendations/controller.py
+@@ -16,6 +16,7 @@ from music_assistant.controllers.music.constants import (
+     RECOMMENDATIONS_ITEMS_TIMEOUT,
+     RECOMMENDATIONS_ROWS_TIMEOUT,
+ )
++from music_assistant.controllers.music.recommendations.layout import apply_layout, load_layout
+ from music_assistant.providers.recommendations import LibraryRecommendationsProvider
+ 
+ if TYPE_CHECKING:
+@@ -66,7 +67,9 @@ class RecommendationsController:
+             ),
+         ]
+         # interleave: one folder per source per pass, preserving each source's ordering
+-        return [item for sublist in zip_longest(*rows_per_source) for item in sublist if item]
++        rows = [item for sublist in zip_longest(*rows_per_source) for item in sublist if item]
++        # optional user layout (recommendations_layout.json in the data directory): drop duplicate rows, hide, order
++        return apply_layout(rows, load_layout(self.mass.storage_path))
+ 
+     async def get_recommendation_items(
+         self, provider: str, item_id: str, providers: list[str] | None = None
+diff --git a/music_assistant/controllers/music/recommendations/layout.py b/music_assistant/controllers/music/recommendations/layout.py
+new file mode 100644
+index 0000000..ba5739e
+--- /dev/null
++++ b/music_assistant/controllers/music/recommendations/layout.py
+@@ -0,0 +1,94 @@
++"""Optional user layout for the recommendation rows: drop duplicates, hide rows, set their order.
++
++The rows of all providers are interleaved one per source per pass, with no say over which rows exist, which
++come first, or that two sources can offer the same row (a Subsonic server's "recently added albums" next to the
++library's own). A JSON file in the data directory, `recommendations_layout.json`, takes that over:
++
++    {
++      "dedupe": true,
++      "hide": ["lastfm_recommendations:*", "name:Trending*", "*geo_artists*"],
++      "order": ["in_progress", "recently_played", "recommendations:*"]
++    }
++
++* dedupe (default true): of rows sharing a translation_key keep one, preferring the library's own.
++* hide: rows matching any pattern are not offered at all.
++* order: rows matching an earlier pattern come first; the rest keep their interleaved order after them.
++
++A pattern is a case-insensitive fnmatch against `provider:item_id`, `item_id`, `translation_key` and
++`name:<row name>`. The file is read on every request, so edits apply without a restart. A missing or broken file
++leaves the rows as they were (but for dedupe).
++"""
++
++from __future__ import annotations
++
++import json
++from fnmatch import fnmatchcase
++from pathlib import Path
++from typing import Any
++
++LAYOUT_FILENAME = "recommendations_layout.json"
++LIBRARY_PROVIDER = "recommendations"
++
++
++def load_layout(storage_path: str | Path) -> dict[str, Any]:
++    """Read the layout file; anything missing or malformed means no layout."""
++    try:
++        data = json.loads((Path(storage_path) / LAYOUT_FILENAME).read_text(encoding="utf-8"))
++    except (OSError, ValueError):
++        return {}
++    return data if isinstance(data, dict) else {}
++
++
++def _keys(row: Any) -> list[str]:
++    provider = str(getattr(row, "provider", "") or "")
++    item_id = str(getattr(row, "item_id", "") or "")
++    return [
++        f"{provider}:{item_id}".lower(),
++        item_id.lower(),
++        str(getattr(row, "translation_key", "") or "").lower(),
++        f"name:{getattr(row, 'name', '') or ''}".lower(),
++    ]
++
++
++def _matches(row: Any, patterns: list[str]) -> int | None:
++    """Index of the first pattern that matches the row, else None."""
++    keys = _keys(row)
++    for index, pattern in enumerate(patterns):
++        pat = str(pattern).lower()
++        if any(fnmatchcase(key, pat) for key in keys):
++            return index
++    return None
++
++
++def _dedupe(rows: list[Any]) -> list[Any]:
++    """Keep one row per translation_key, the library's own when it has one."""
++    chosen: dict[str, Any] = {}
++    for row in rows:
++        key = str(getattr(row, "translation_key", "") or "")
++        if not key:
++            continue
++        current = chosen.get(key)
++        if current is None or (
++            getattr(row, "provider", None) == LIBRARY_PROVIDER
++            and getattr(current, "provider", None) != LIBRARY_PROVIDER
++        ):
++            chosen[key] = row
++    return [
++        row
++        for row in rows
++        if not getattr(row, "translation_key", None) or chosen[str(row.translation_key)] is row
++    ]
++
++
++def apply_layout(rows: list[Any], layout: dict[str, Any]) -> list[Any]:
++    """Return the rows with duplicates dropped, hidden rows removed and the wanted order applied."""
++    if layout.get("dedupe", True):
++        rows = _dedupe(rows)
++    hide = [str(p) for p in layout.get("hide") or []]
++    if hide:
++        rows = [row for row in rows if _matches(row, hide) is None]
++    order = [str(p) for p in layout.get("order") or []]
++    if order:
++        rank = len(order)
++        rows = sorted(rows, key=lambda row: rank if (m := _matches(row, order)) is None else m)
++    return rows
+diff --git a/tests/controllers/music/test_recommendations_layout.py b/tests/controllers/music/test_recommendations_layout.py
+new file mode 100644
+index 0000000..cdb1e1c
+--- /dev/null
++++ b/tests/controllers/music/test_recommendations_layout.py
+@@ -0,0 +1,78 @@
++"""The recommendations layout file: duplicate rows dropped, rows hidden, rows ordered."""
++
++from __future__ import annotations
++
++import importlib.util
++import json
++from pathlib import Path
++from types import SimpleNamespace
++
++# loaded by path: the package __init__ pulls in the whole server, and this module needs none of it
++_PATH = (
++    Path(__file__).resolve().parents[3]
++    / "music_assistant/controllers/music/recommendations/layout.py"
++)
++_spec = importlib.util.spec_from_file_location("recommendations_layout", _PATH)
++assert _spec and _spec.loader
++layout = importlib.util.module_from_spec(_spec)
++_spec.loader.exec_module(layout)
++
++
++def row(provider: str, item_id: str, name: str, key: str | None = None) -> SimpleNamespace:
++    return SimpleNamespace(provider=provider, item_id=item_id, name=name, translation_key=key or item_id)
++
++
++ROWS = [
++    row("opensubsonic", "subsonic_new_albums", "New Albums", "recently_added_albums"),
++    row("recommendations", "recently_added_albums", "Recently Added Albums"),
++    row("lastfm", "lastfm_geo_artists", "Top artists for FI", "geo_artists"),
++    row("tunein", "trending", "Trending", "trending_stations"),
++    row("recommendations", "most_played_tracks", "Most Played Tracks"),
++]
++
++
++def ids(rows: list) -> list[str]:
++    return [r.item_id for r in rows]
++
++
++def test_no_layout_only_drops_duplicates_and_keeps_the_librarys_own() -> None:
++    out = layout.apply_layout(ROWS, {})
++    assert ids(out) == ["recently_added_albums", "lastfm_geo_artists", "trending", "most_played_tracks"]
++    assert out[0].provider == "recommendations"
++
++
++def test_dedupe_can_be_switched_off() -> None:
++    assert len(layout.apply_layout(ROWS, {"dedupe": False})) == len(ROWS)
++
++
++def test_rows_without_a_key_are_never_deduped() -> None:
++    a = SimpleNamespace(provider="x", item_id="a", name="A", translation_key=None)
++    b = SimpleNamespace(provider="y", item_id="b", name="B", translation_key=None)
++    assert layout.apply_layout([a, b], {}) == [a, b]
++
++
++def test_hide_matches_provider_id_key_and_name_case_insensitively() -> None:
++    assert "lastfm_geo_artists" not in ids(layout.apply_layout(ROWS, {"hide": ["LASTFM:*"]}))
++    assert "trending" not in ids(layout.apply_layout(ROWS, {"hide": ["name:trending"]}))
++    assert "lastfm_geo_artists" not in ids(layout.apply_layout(ROWS, {"hide": ["*geo_artists*"]}))
++    assert "most_played_tracks" not in ids(layout.apply_layout(ROWS, {"hide": ["most_played_tracks"]}))
++
++
++def test_order_puts_matches_first_in_pattern_order_and_keeps_the_rest_in_place() -> None:
++    out = layout.apply_layout(ROWS, {"order": ["most_played_tracks", "trending"]})
++    assert ids(out) == ["most_played_tracks", "trending", "recently_added_albums", "lastfm_geo_artists"]
++
++
++def test_order_applies_after_hide() -> None:
++    out = layout.apply_layout(ROWS, {"hide": ["trending"], "order": ["trending", "most_played_tracks"]})
++    assert ids(out)[0] == "most_played_tracks" and "trending" not in ids(out)
++
++
++def test_load_layout_tolerates_missing_and_broken_files(tmp_path: Path) -> None:
++    assert layout.load_layout(tmp_path) == {}
++    (tmp_path / layout.LAYOUT_FILENAME).write_text("{not json", encoding="utf-8")
++    assert layout.load_layout(tmp_path) == {}
++    (tmp_path / layout.LAYOUT_FILENAME).write_text("[1, 2]", encoding="utf-8")
++    assert layout.load_layout(tmp_path) == {}
++    (tmp_path / layout.LAYOUT_FILENAME).write_text(json.dumps({"hide": ["a"]}), encoding="utf-8")
++    assert layout.load_layout(tmp_path) == {"hide": ["a"]}
+-- 
+2.39.5 (Apple Git-154)
+

@@ -24,6 +24,7 @@ https://github.com/ollisulopuisto/music-assistant-patched-repo
 | `patches/server/0002-status-refetch.patch` | Stops re-fetching the account-wide in-progress/history lists once per podcast during a sync |
 | `patches/server/0003-show-notes.patch` | Gives episodes in the mixed browse folders their show notes |
 | `patches/server/0004-library-first-letter-jump.patch` | Lets a library listing start at a first letter and run on from there, as an indexed comparison on the name column the current sort uses |
+| `patches/server/0005-recommendations-layout.patch` | Lets a `recommendations_layout.json` in the data directory drop duplicate Discover rows (a Subsonic server's and the library's own), hide rows and put others first |
 | `patches/server/0100-install-patched-frontend.patch` | Installs the locally built frontend wheel over the one upstream pins |
 | `patches/server/0110-app-vars-from-data-dir.patch` | Reads private app credentials from the add-on data directory |
 | `patches/server/0120-dsd-multichannel-pcm.patch` | Preserves multichannel PCM for capable players, standardizes six-channel PCM as 5.1(side), retains stereo output, and converts DSD to PCM |
