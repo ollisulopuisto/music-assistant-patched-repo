@@ -1,23 +1,25 @@
-From 7b61dc91ce02c04cb2da4bf7a31feda0256666f8 Mon Sep 17 00:00:00 2001
+From a3ae15bf12624a8789d69777c3cc3c1f59f4b737 Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
 Date: Fri, 9 Oct 2026 11:20:26 +0300
-Subject: [PATCH] Page a playlist's tracks from the server
+Subject: [PATCH] Page a playlist's tracks from the server, with an A-Z strip
 
 Opening a big playlist fetched every track in one call. The listing now asks the
 server for 50 at a time (music/playlists/playlist_tracks_page), in the chosen order
 and with the search text, so the first screen no longer waits for the whole list.
+Sorted by name it also gets the A-Z strip other library listings have; the jump and
+the page above it use the same letter bounds.
 
 Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
 ---
- src/plugins/api/index.ts      | 21 +++++++++++++++++++++
- src/views/PlaylistDetails.vue | 11 +++++++----
- 2 files changed, 28 insertions(+), 4 deletions(-)
+ src/plugins/api/index.ts      | 25 +++++++++++++++++++++++++
+ src/views/PlaylistDetails.vue | 14 ++++++++++----
+ 2 files changed, 35 insertions(+), 4 deletions(-)
 
 diff --git a/src/plugins/api/index.ts b/src/plugins/api/index.ts
-index 886b0d8..1b8e25b 100644
+index 886b0d8..95fc919 100644
 --- a/src/plugins/api/index.ts
 +++ b/src/plugins/api/index.ts
-@@ -882,6 +882,27 @@ export class MusicAssistantApi {
+@@ -882,6 +882,31 @@ export class MusicAssistantApi {
      });
    }
  
@@ -30,6 +32,8 @@ index 886b0d8..1b8e25b 100644
 +    order_by: string,
 +    search?: string,
 +    force_refresh?: boolean,
++    starts_from?: string,
++    starts_before?: string,
 +  ): Promise<(Track | Radio | PodcastEpisode | Audiobook)[]> {
 +    return this.sendCommand("music/playlists/playlist_tracks_page", {
 +      item_id,
@@ -39,6 +43,8 @@ index 886b0d8..1b8e25b 100644
 +      order_by,
 +      search: search || undefined,
 +      force_refresh,
++      starts_from,
++      starts_before,
 +    });
 +  }
 +
@@ -46,19 +52,20 @@ index 886b0d8..1b8e25b 100644
      db_playlist_id: string | number,
      uris: string[],
 diff --git a/src/views/PlaylistDetails.vue b/src/views/PlaylistDetails.vue
-index 4d1ea23..0e93402 100644
+index 4d1ea23..9dbf2e5 100644
 --- a/src/views/PlaylistDetails.vue
 +++ b/src/views/PlaylistDetails.vue
-@@ -50,7 +50,7 @@
+@@ -50,7 +50,8 @@
      :show-track-number="false"
      :show-refresh-button="true"
      :refresh-on-parent-update="true"
 -    :load-items="loadPlaylistTracks"
 +    :load-paged-data="loadPlaylistTracksPage"
++    :show-alphabet-jump="true"
      :sort-keys="[
        'position',
        'position_desc',
-@@ -65,7 +65,6 @@
+@@ -65,7 +66,6 @@
      :allow-key-hooks="true"
      :path="`playlist.${props.itemId}.${props.provider}`"
      :restore-state="true"
@@ -66,7 +73,7 @@ index 4d1ea23..0e93402 100644
    />
  
    <ProviderDetails v-if="itemDetails" :item-details="itemDetails" />
-@@ -147,10 +146,14 @@ onMounted(() => {
+@@ -147,11 +147,17 @@ onMounted(() => {
    onBeforeUnmount(unsub);
  });
  
@@ -81,8 +88,11 @@ index 4d1ea23..0e93402 100644
 +    params.sortBy,
 +    params.search,
      params.refresh,
++    params.startsFrom,
++    params.startsBefore,
    );
  };
+ </script>
 -- 
 2.39.5 (Apple Git-154)
 

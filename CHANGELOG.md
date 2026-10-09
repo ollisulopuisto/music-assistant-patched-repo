@@ -10,6 +10,8 @@ which the build writes.
 
 Waiting for the next publish build (patches are committed, not pushed):
 
+- A-Z strip on a playlist's tracks when sorted by name (jump to a letter, scroll up and down from it), same strip as artists and albums.
+
 - Opening a big playlist no longer loads every track at once. The contents load 50 at a
   time from a new server command, `music/playlists/playlist_tracks_page`, in the chosen
   order and with the search text. Untested in a browser: the scroll loading needs a look

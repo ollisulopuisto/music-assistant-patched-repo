@@ -1,4 +1,4 @@
-From 2c5de27dd8e1911122ca15fd5bc445ad7cf03205 Mon Sep 17 00:00:00 2001
+From de8efc5152b201d20ee4db3961ecc725f5e89106 Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
 Date: Fri, 9 Oct 2026 11:17:51 +0300
 Subject: [PATCH] Add a paged playlist contents command
@@ -6,25 +6,27 @@ Subject: [PATCH] Add a paged playlist contents command
 Opening a big playlist sent every track in one message, so the first open was slow
 and the listing held thousands of items it was not showing.
 
-music/playlists/playlist_tracks_page takes limit, offset, order_by and search. In
-provider order without a search it stops reading the provider as soon as the page is
-full; any other order, or a search, reads everything first because the contents are
-not in the database. The existing playlist_tracks command is unchanged, so playback
-and other clients are unaffected.
+music/playlists/playlist_tracks_page takes limit, offset, order_by, search and the
+A-Z jump bounds starts_from / starts_before. In provider order without a search or
+bound it stops reading the provider as soon as the page is full; any other order, a
+search or a letter bound reads everything first because the contents are not in the
+database. Name orders sort on the folded name, so the list agrees with where a jump
+lands. The existing playlist_tracks command is unchanged, so playback and other
+clients are unaffected.
 
 Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
 ---
- .../controllers/music/media/playlists.py      |  48 +++++++
- music_assistant/helpers/playlist_page.py      |  80 +++++++++++
- .../music/test_playlist_tracks_page.py        |  84 +++++++++++
- tests/helpers/test_playlist_page.py           | 133 ++++++++++++++++++
- 4 files changed, 345 insertions(+)
+ .../controllers/music/media/playlists.py      |  55 +++++
+ music_assistant/helpers/playlist_page.py      | 124 +++++++++++
+ .../music/test_playlist_tracks_page.py        |  99 +++++++++
+ tests/helpers/test_playlist_page.py           | 196 ++++++++++++++++++
+ 4 files changed, 474 insertions(+)
  create mode 100644 music_assistant/helpers/playlist_page.py
  create mode 100644 tests/controllers/music/test_playlist_tracks_page.py
  create mode 100644 tests/helpers/test_playlist_page.py
 
 diff --git a/music_assistant/controllers/music/media/playlists.py b/music_assistant/controllers/music/media/playlists.py
-index e370d39..c606c24 100644
+index e370d39..8fd8586 100644
 --- a/music_assistant/controllers/music/media/playlists.py
 +++ b/music_assistant/controllers/music/media/playlists.py
 @@ -25,6 +25,7 @@ from music_assistant.controllers.tasks.context import (
@@ -47,7 +49,7 @@ index e370d39..c606c24 100644
          self.mass.register_api_command(
              "music/playlists/add_playlist_tracks",
              self.add_playlist_tracks,
-@@ -157,6 +163,48 @@ class PlaylistController(MediaControllerBase[Playlist]):
+@@ -157,6 +163,55 @@ class PlaylistController(MediaControllerBase[Playlist]):
                  yield track
              page += 1
  
@@ -59,6 +61,8 @@ index e370d39..c606c24 100644
 +        offset: int = 0,
 +        order_by: str = "position",
 +        search: str | None = None,
++        starts_from: str | None = None,
++        starts_before: str | None = None,
 +        force_refresh: bool = False,
 +    ) -> list[PlaylistPlayableItem]:
 +        """
@@ -75,11 +79,14 @@ index e370d39..c606c24 100644
 +        :param order_by: position, position_desc, name, name_desc, artist, album,
 +            duration, duration_desc, timestamp_added or timestamp_added_desc.
 +        :param search: Keep items whose title, album or first artist contains this text.
++        :param starts_from: Keep items filed from this letter onwards (an A-Z jump).
++        :param starts_before: Keep items filed before this letter; with the order reversed
++            this is the page above a jump, nearest first.
 +        :param force_refresh: Bypass cached playlist contents.
 +        """
 +        if limit < 1 or offset < 0:
 +            raise InvalidDataError("limit must be at least 1 and offset cannot be negative")
-+        early_stop = wants_early_stop(order_by, search)
++        early_stop = wants_early_stop(order_by, search, starts_from, starts_before)
 +        stream = self.tracks(item_id, provider_instance_id_or_domain, force_refresh=force_refresh)
 +        items: list[PlaylistPlayableItem] = []
 +        try:
@@ -91,22 +98,25 @@ index e370d39..c606c24 100644
 +            await stream.aclose()
 +        if early_stop:
 +            return items[offset : offset + limit]
-+        return page_playlist_items(items, order_by, search, offset, limit)
++        return page_playlist_items(
++            items, order_by, search, offset, limit, starts_from, starts_before
++        )
 +
      async def create_playlist(
          self,
          name: str,
 diff --git a/music_assistant/helpers/playlist_page.py b/music_assistant/helpers/playlist_page.py
 new file mode 100644
-index 0000000..b429b27
+index 0000000..25b5114
 --- /dev/null
 +++ b/music_assistant/helpers/playlist_page.py
-@@ -0,0 +1,80 @@
+@@ -0,0 +1,124 @@
 +"""Paging, sorting and searching for the contents of a playlist."""
 +
 +from __future__ import annotations
 +
 +import re
++import unicodedata
 +from collections.abc import Callable, Sequence
 +from typing import Any
 +
@@ -119,8 +129,26 @@ index 0000000..b429b27
 +    return [(0, int(p)) if i % 2 else (1, p) for i, p in enumerate(parts) if p != ""]
 +
 +
++def _letter_key(item: Any, order_by: str) -> str:
++    """Return the folded name an A-Z jump compares against, as the strip files it."""
++    plain = order_by in ("name", "name_desc")
++    source = (
++        getattr(item, "name", None)
++        if plain
++        else getattr(item, "sort_name", None) or getattr(item, "name", None)
++    )
++    folded = unicodedata.normalize("NFD", source or "")
++    folded = "".join(ch for ch in folded if not unicodedata.combining(ch)).casefold()
++    return re.sub(r"[^a-z0-9]", "", folded)
++
++
++def _plain_name(item: Any) -> list[tuple[int, int | str]]:
++    """Order by the folded name, so the list agrees with where an A-Z jump lands."""
++    return _natural(_letter_key(item, "name"))
++
++
 +def _sort_name(item: Any) -> list[tuple[int, int | str]]:
-+    return _natural(getattr(item, "sort_name", None) or getattr(item, "name", None))
++    return _natural(_letter_key(item, "sort_name"))
 +
 +
 +def _first_artist(item: Any) -> list[tuple[int, int | str]]:
@@ -144,8 +172,10 @@ index 0000000..b429b27
 +_ORDERS: dict[str, tuple[Callable[[Any], Any], bool]] = {
 +    "position": (_number("position"), False),
 +    "position_desc": (_number("position"), True),
-+    "name": (_sort_name, False),
-+    "name_desc": (_sort_name, True),
++    "name": (_plain_name, False),
++    "name_desc": (_plain_name, True),
++    "sort_name": (_sort_name, False),
++    "sort_name_desc": (_sort_name, True),
 +    "artist": (_first_artist, False),
 +    "album": (_album_key, False),
 +    "duration": (_number("duration"), False),
@@ -155,9 +185,14 @@ index 0000000..b429b27
 +}
 +
 +
-+def wants_early_stop(order_by: str, search: str | None) -> bool:
++def wants_early_stop(
++    order_by: str,
++    search: str | None,
++    starts_from: str | None = None,
++    starts_before: str | None = None,
++) -> bool:
 +    """Return True when a page can be cut from the provider stream without reading it all."""
-+    return order_by == "position" and not search
++    return order_by == "position" and not search and not starts_from and not starts_before
 +
 +
 +def _matches(item: Any, needle: str) -> bool:
@@ -171,23 +206,41 @@ index 0000000..b429b27
 +
 +
 +def page_playlist_items[T](
-+    items: Sequence[T], order_by: str, search: str | None, offset: int, limit: int
++    items: Sequence[T],
++    order_by: str,
++    search: str | None,
++    offset: int,
++    limit: int,
++    starts_from: str | None = None,
++    starts_before: str | None = None,
 +) -> list[T]:
-+    """Return one page of playlist items, filtered by search and sorted by order_by."""
++    """
++    Return one page of playlist items, filtered by search and sorted by order_by.
++
++    :param starts_from: Keep items filed from this letter onwards (an A-Z jump).
++    :param starts_before: Keep items filed before this letter; with the order reversed this
++        is the page above a jump, nearest first.
++    """
 +    result = list(items)
 +    if search:
 +        needle = search.casefold()
 +        result = [item for item in result if _matches(item, needle)]
++    if starts_from:
++        bound = starts_from.casefold()
++        result = [item for item in result if _letter_key(item, order_by) >= bound]
++    if starts_before:
++        bound = starts_before.casefold()
++        result = [item for item in result if _letter_key(item, order_by) < bound]
 +    if order_by in _ORDERS:
 +        key, reverse = _ORDERS[order_by]
 +        result.sort(key=key, reverse=reverse)
 +    return result[offset : offset + limit]
 diff --git a/tests/controllers/music/test_playlist_tracks_page.py b/tests/controllers/music/test_playlist_tracks_page.py
 new file mode 100644
-index 0000000..fba7ead
+index 0000000..efe83c6
 --- /dev/null
 +++ b/tests/controllers/music/test_playlist_tracks_page.py
-@@ -0,0 +1,84 @@
+@@ -0,0 +1,99 @@
 +"""
 +Tests for the paged playlist contents command.
 +
@@ -272,12 +325,27 @@ index 0000000..fba7ead
 +    """Bad paging arguments are rejected."""
 +    with pytest.raises(InvalidDataError):
 +        await _page(_Source(10), limit=limit, offset=offset)
++
++
++async def test_letter_jump_reads_everything_and_starts_at_the_letter() -> None:
++    """An A-Z jump needs every title, then keeps the ones filed from the bound on."""
++    src = _Source(30)
++    page = await _page(src, limit=5, offset=0, order_by="name", starts_from="t020")
++    assert src.read == 30
++    assert [t.name for t in page] == ["t020", "t021", "t022", "t023", "t024"]
++
++
++async def test_page_above_a_jump_is_reversed_and_nearest_first() -> None:
++    """The page above a jump to t020: reverse order, only titles before it, nearest first."""
++    src = _Source(30)
++    page = await _page(src, limit=3, offset=0, order_by="name_desc", starts_before="t020")
++    assert [t.name for t in page] == ["t019", "t018", "t017"]
 diff --git a/tests/helpers/test_playlist_page.py b/tests/helpers/test_playlist_page.py
 new file mode 100644
-index 0000000..ca569e2
+index 0000000..1080797
 --- /dev/null
 +++ b/tests/helpers/test_playlist_page.py
-@@ -0,0 +1,133 @@
+@@ -0,0 +1,196 @@
 +"""
 +Tests for paging, sorting and searching the contents of a playlist.
 +
@@ -411,6 +479,69 @@ index 0000000..ca569e2
 +    assert wants_early_stop("position_desc", None) is False
 +    assert wants_early_stop("name", None) is False
 +    assert wants_early_stop("position", "abc") is False
++
++
++@pytest.fixture
++def lettered() -> list[SimpleNamespace]:
++    """Titles across the alphabet, with a digit, punctuation and an accent."""
++    return [
++        _track("Zebra", position=1),
++        _track("alpha", position=2),
++        _track("Ärtig", position=3),
++        _track("1999", position=4),
++        _track("!!!", position=5),
++        _track("Mirror", position=6),
++        _track("Mango", position=7),
++    ]
++
++
++def test_starts_from_keeps_the_letter_and_everything_after_it(
++    lettered: list[SimpleNamespace],
++) -> None:
++    """A jump to M starts at the first title filed under M and runs on to the end."""
++    page = page_playlist_items(lettered, "name", None, 0, 10, starts_from="m")
++    assert _names(page) == ["Mango", "Mirror", "Zebra"]
++
++
++def test_starts_from_is_case_and_accent_insensitive(lettered: list[SimpleNamespace]) -> None:
++    """The jump letter and the titles are compared folded, so A reaches Ärtig."""
++    page = page_playlist_items(lettered, "name", None, 0, 10, starts_from="A")
++    assert _names(page) == ["alpha", "Ärtig", "Mango", "Mirror", "Zebra"]
++
++
++def test_a_letter_with_no_titles_opens_at_what_follows(lettered: list[SimpleNamespace]) -> None:
++    """Nothing is filed under P, so a jump to P opens at Z."""
++    assert _names(page_playlist_items(lettered, "name", None, 0, 10, starts_from="p")) == ["Zebra"]
++
++
++def test_unlettered_titles_sort_above_a(lettered: list[SimpleNamespace]) -> None:
++    """Digits and punctuation-only titles are the top of the listing, before A."""
++    assert _names(page_playlist_items(lettered, "name", None, 0, 3)) == ["!!!", "1999", "alpha"]
++
++
++def test_starts_before_with_reversed_order_walks_up_from_the_jump(
++    lettered: list[SimpleNamespace],
++) -> None:
++    """The page above a jump to M: reverse order, nearest first, only what precedes M."""
++    page = page_playlist_items(lettered, "name_desc", None, 0, 2, starts_before="m")
++    assert _names(page) == ["Ärtig", "alpha"]
++    assert _names(page_playlist_items(lettered, "name_desc", None, 2, 5, starts_before="m")) == [
++        "1999",
++        "!!!",
++    ]
++
++
++def test_letter_bounds_compose_with_search_and_paging(lettered: list[SimpleNamespace]) -> None:
++    """Search narrows first, then the bound, then the page."""
++    page = page_playlist_items(lettered, "name", "m", 0, 1, starts_from="n")
++    assert page == []  # Mirror and Mango match "m" but both are filed before N
++    assert _names(page_playlist_items(lettered, "name", "m", 0, 5, starts_from="mi")) == ["Mirror"]
++
++
++def test_early_stop_is_off_when_a_letter_bound_is_given() -> None:
++    """A bound has to see every title, so the provider stream is read in full."""
++    assert wants_early_stop("position", None, starts_from="a") is False
++    assert wants_early_stop("position", None, starts_before="a") is False
 -- 
 2.39.5 (Apple Git-154)
 
