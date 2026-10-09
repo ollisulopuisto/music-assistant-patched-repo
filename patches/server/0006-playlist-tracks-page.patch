@@ -1,0 +1,416 @@
+From 2c5de27dd8e1911122ca15fd5bc445ad7cf03205 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Fri, 9 Oct 2026 11:17:51 +0300
+Subject: [PATCH] Add a paged playlist contents command
+
+Opening a big playlist sent every track in one message, so the first open was slow
+and the listing held thousands of items it was not showing.
+
+music/playlists/playlist_tracks_page takes limit, offset, order_by and search. In
+provider order without a search it stops reading the provider as soon as the page is
+full; any other order, or a search, reads everything first because the contents are
+not in the database. The existing playlist_tracks command is unchanged, so playback
+and other clients are unaffected.
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ .../controllers/music/media/playlists.py      |  48 +++++++
+ music_assistant/helpers/playlist_page.py      |  80 +++++++++++
+ .../music/test_playlist_tracks_page.py        |  84 +++++++++++
+ tests/helpers/test_playlist_page.py           | 133 ++++++++++++++++++
+ 4 files changed, 345 insertions(+)
+ create mode 100644 music_assistant/helpers/playlist_page.py
+ create mode 100644 tests/controllers/music/test_playlist_tracks_page.py
+ create mode 100644 tests/helpers/test_playlist_page.py
+
+diff --git a/music_assistant/controllers/music/media/playlists.py b/music_assistant/controllers/music/media/playlists.py
+index e370d39..c606c24 100644
+--- a/music_assistant/controllers/music/media/playlists.py
++++ b/music_assistant/controllers/music/media/playlists.py
+@@ -25,6 +25,7 @@ from music_assistant.controllers.tasks.context import (
+ from music_assistant.controllers.webserver.helpers.auth_middleware import get_current_user
+ from music_assistant.helpers.database import UNSET
+ from music_assistant.helpers.json import json_loads, serialize_to_json
++from music_assistant.helpers.playlist_page import page_playlist_items, wants_early_stop
+ from music_assistant.helpers.playlists import (
+     PlaylistItem,
+     generate_m3u,
+@@ -85,6 +86,11 @@ class PlaylistController(MediaControllerBase[Playlist]):
+         self.mass.register_api_command(
+             "music/playlists/playlist_tracks", self.tracks, required_scope=Scope.LIBRARY_READ
+         )
++        self.mass.register_api_command(
++            "music/playlists/playlist_tracks_page",
++            self.tracks_page,
++            required_scope=Scope.LIBRARY_READ,
++        )
+         self.mass.register_api_command(
+             "music/playlists/add_playlist_tracks",
+             self.add_playlist_tracks,
+@@ -157,6 +163,48 @@ class PlaylistController(MediaControllerBase[Playlist]):
+                 yield track
+             page += 1
+ 
++    async def tracks_page(
++        self,
++        item_id: str,
++        provider_instance_id_or_domain: str,
++        limit: int = 50,
++        offset: int = 0,
++        order_by: str = "position",
++        search: str | None = None,
++        force_refresh: bool = False,
++    ) -> list[PlaylistPlayableItem]:
++        """
++        Return one page of the items in a provider playlist.
++
++        Same source as `tracks`, but a big playlist is not sent in one message. In
++        provider order without a search the stream is read only as far as the page
++        needs; any other order or a search has to see every item first.
++
++        :param item_id: Provider playlist ID.
++        :param provider_instance_id_or_domain: Provider instance ID or domain.
++        :param limit: Maximum number of items to return.
++        :param offset: Number of items to skip, in the requested order.
++        :param order_by: position, position_desc, name, name_desc, artist, album,
++            duration, duration_desc, timestamp_added or timestamp_added_desc.
++        :param search: Keep items whose title, album or first artist contains this text.
++        :param force_refresh: Bypass cached playlist contents.
++        """
++        if limit < 1 or offset < 0:
++            raise InvalidDataError("limit must be at least 1 and offset cannot be negative")
++        early_stop = wants_early_stop(order_by, search)
++        stream = self.tracks(item_id, provider_instance_id_or_domain, force_refresh=force_refresh)
++        items: list[PlaylistPlayableItem] = []
++        try:
++            async for item in stream:
++                items.append(item)
++                if early_stop and len(items) >= offset + limit:
++                    break
++        finally:
++            await stream.aclose()
++        if early_stop:
++            return items[offset : offset + limit]
++        return page_playlist_items(items, order_by, search, offset, limit)
++
+     async def create_playlist(
+         self,
+         name: str,
+diff --git a/music_assistant/helpers/playlist_page.py b/music_assistant/helpers/playlist_page.py
+new file mode 100644
+index 0000000..b429b27
+--- /dev/null
++++ b/music_assistant/helpers/playlist_page.py
+@@ -0,0 +1,80 @@
++"""Paging, sorting and searching for the contents of a playlist."""
++
++from __future__ import annotations
++
++import re
++from collections.abc import Callable, Sequence
++from typing import Any
++
++_DIGITS = re.compile(r"(\d+)")
++
++
++def _natural(value: str | None) -> list[tuple[int, int | str]]:
++    """Case-folded sort key where digit runs compare as numbers ("2" before "10")."""
++    parts = _DIGITS.split((value or "").casefold())
++    return [(0, int(p)) if i % 2 else (1, p) for i, p in enumerate(parts) if p != ""]
++
++
++def _sort_name(item: Any) -> list[tuple[int, int | str]]:
++    return _natural(getattr(item, "sort_name", None) or getattr(item, "name", None))
++
++
++def _first_artist(item: Any) -> list[tuple[int, int | str]]:
++    artists = getattr(item, "artists", None)
++    if not artists:
++        return _natural(None)
++    return _natural(getattr(artists[0], "sort_name", None) or artists[0].name)
++
++
++def _album_key(item: Any) -> tuple[Any, ...]:
++    album = getattr(item, "album", None)
++    name = _natural((getattr(album, "sort_name", None) or album.name) if album else None)
++    return (name, getattr(item, "disc_number", None) or 0, getattr(item, "track_number", None) or 0)
++
++
++def _number(attr: str) -> Callable[[Any], float]:
++    return lambda item: getattr(item, attr, None) or 0
++
++
++# order_by -> (key, reverse). Anything else keeps the provider's own order.
++_ORDERS: dict[str, tuple[Callable[[Any], Any], bool]] = {
++    "position": (_number("position"), False),
++    "position_desc": (_number("position"), True),
++    "name": (_sort_name, False),
++    "name_desc": (_sort_name, True),
++    "artist": (_first_artist, False),
++    "album": (_album_key, False),
++    "duration": (_number("duration"), False),
++    "duration_desc": (_number("duration"), True),
++    "timestamp_added": (_number("timestamp_added"), False),
++    "timestamp_added_desc": (_number("timestamp_added"), True),
++}
++
++
++def wants_early_stop(order_by: str, search: str | None) -> bool:
++    """Return True when a page can be cut from the provider stream without reading it all."""
++    return order_by == "position" and not search
++
++
++def _matches(item: Any, needle: str) -> bool:
++    if needle in (getattr(item, "name", None) or "").casefold():
++        return True
++    album = getattr(item, "album", None)
++    if album is not None and needle in (getattr(album, "name", None) or "").casefold():
++        return True
++    artists = getattr(item, "artists", None)
++    return bool(artists) and needle in (getattr(artists[0], "name", None) or "").casefold()
++
++
++def page_playlist_items[T](
++    items: Sequence[T], order_by: str, search: str | None, offset: int, limit: int
++) -> list[T]:
++    """Return one page of playlist items, filtered by search and sorted by order_by."""
++    result = list(items)
++    if search:
++        needle = search.casefold()
++        result = [item for item in result if _matches(item, needle)]
++    if order_by in _ORDERS:
++        key, reverse = _ORDERS[order_by]
++        result.sort(key=key, reverse=reverse)
++    return result[offset : offset + limit]
+diff --git a/tests/controllers/music/test_playlist_tracks_page.py b/tests/controllers/music/test_playlist_tracks_page.py
+new file mode 100644
+index 0000000..fba7ead
+--- /dev/null
++++ b/tests/controllers/music/test_playlist_tracks_page.py
+@@ -0,0 +1,84 @@
++"""
++Tests for the paged playlist contents command.
++
++The command must stop reading the provider as soon as a provider-ordered page is full,
++read everything for any other order or a search, and reject nonsense paging arguments.
++"""
++
++from __future__ import annotations
++
++from collections.abc import AsyncGenerator
++from types import SimpleNamespace
++
++import pytest
++from music_assistant_models.errors import InvalidDataError
++
++from music_assistant.controllers.music.media.playlists import PlaylistController
++
++pytestmark = pytest.mark.asyncio
++
++
++class _Source:
++    """A stand-in for the controller: yields numbered tracks and records how far it was read."""
++
++    def __init__(self, count: int) -> None:
++        self.count = count
++        self.read = 0
++        self.closed = False
++
++    async def tracks(self, *_args: object, **_kwargs: object) -> AsyncGenerator[SimpleNamespace]:
++        try:
++            for i in range(self.count):
++                self.read += 1
++                yield SimpleNamespace(
++                    name=f"t{i:03d}",
++                    sort_name=f"t{i:03d}",
++                    artists=[],
++                    album=None,
++                    duration=self.count - i,
++                    position=i,
++                )
++        finally:
++            self.closed = True
++
++
++async def _page(src: _Source, **kwargs: object) -> list[SimpleNamespace]:
++    return await PlaylistController.tracks_page(src, "pl", "spotify", **kwargs)  # type: ignore[arg-type]
++
++
++async def test_provider_order_page_reads_only_what_it_needs() -> None:
++    """Provider order page reads only what it needs."""
++    src = _Source(1000)
++    page = await _page(src, limit=50, offset=100)
++    assert [t.position for t in page] == list(range(100, 150))
++    assert src.read == 150
++    assert src.closed
++
++
++async def test_other_orders_read_everything() -> None:
++    """Other orders read everything."""
++    src = _Source(300)
++    page = await _page(src, limit=5, offset=0, order_by="duration")
++    assert src.read == 300
++    assert [t.name for t in page] == ["t299", "t298", "t297", "t296", "t295"]
++
++
++async def test_search_reads_everything() -> None:
++    """Search reads everything."""
++    src = _Source(300)
++    page = await _page(src, limit=50, offset=0, search="t29")
++    assert src.read == 300
++    assert len(page) == 10
++
++
++async def test_last_page_is_short_and_past_the_end_is_empty() -> None:
++    """Last page is short and past the end is empty."""
++    assert len(await _page(_Source(120), limit=50, offset=100)) == 20
++    assert await _page(_Source(120), limit=50, offset=500) == []
++
++
++@pytest.mark.parametrize(("limit", "offset"), [(0, 0), (-1, 0), (10, -1)])
++async def test_bad_paging_arguments_are_rejected(limit: int, offset: int) -> None:
++    """Bad paging arguments are rejected."""
++    with pytest.raises(InvalidDataError):
++        await _page(_Source(10), limit=limit, offset=offset)
+diff --git a/tests/helpers/test_playlist_page.py b/tests/helpers/test_playlist_page.py
+new file mode 100644
+index 0000000..ca569e2
+--- /dev/null
++++ b/tests/helpers/test_playlist_page.py
+@@ -0,0 +1,133 @@
++"""
++Tests for paging, sorting and searching the contents of a playlist.
++
++Playlist contents are not in the database: the controller streams them from the provider.
++The listing used to receive every track in one message, so a large playlist made the first
++open slow. ``page_playlist_items`` slices one page, optionally sorted or filtered first, and
++``wants_early_stop`` says when the slice can be taken without reading the whole stream.
++"""
++
++from __future__ import annotations
++
++from types import SimpleNamespace
++
++import pytest
++
++from music_assistant.helpers.playlist_page import page_playlist_items, wants_early_stop
++
++
++def _track(
++    name: str,
++    artist: str = "A",
++    album: str = "X",
++    duration: int = 100,
++    position: int = 0,
++    sort_name: str | None = None,
++    disc: int = 1,
++    track_no: int = 1,
++) -> SimpleNamespace:
++    return SimpleNamespace(
++        name=name,
++        sort_name=sort_name or name.lower(),
++        artists=[SimpleNamespace(name=artist, sort_name=artist.lower())],
++        album=SimpleNamespace(name=album, sort_name=album.lower()),
++        duration=duration,
++        position=position,
++        disc_number=disc,
++        track_number=track_no,
++        timestamp_added=0,
++    )
++
++
++def _names(items: list[SimpleNamespace]) -> list[str]:
++    return [i.name for i in items]
++
++
++@pytest.fixture
++def tracks() -> list[SimpleNamespace]:
++    return [
++        _track("Jam", "Michael Jackson", "Dangerous", 339, 1),
++        _track("Track 10", "Zed", "B", 50, 2),
++        _track("Track 2", "Abba", "A", 400, 3),
++        _track("Black Or White", "Michael Jackson", "Dangerous", 257, 4),
++    ]
++
++
++def test_position_order_is_provider_order(tracks: list[SimpleNamespace]) -> None:
++    """Position order is provider order."""
++    assert _names(page_playlist_items(tracks, "position", None, 0, 10)) == [
++        "Jam",
++        "Track 10",
++        "Track 2",
++        "Black Or White",
++    ]
++
++
++def test_position_desc_reverses(tracks: list[SimpleNamespace]) -> None:
++    """Position desc reverses."""
++    assert _names(page_playlist_items(tracks, "position_desc", None, 0, 2)) == [
++        "Black Or White",
++        "Track 2",
++    ]
++
++
++def test_offset_and_limit_slice_the_ordered_list(tracks: list[SimpleNamespace]) -> None:
++    """Offset and limit slice the ordered list."""
++    assert _names(page_playlist_items(tracks, "position", None, 1, 2)) == ["Track 10", "Track 2"]
++    assert page_playlist_items(tracks, "position", None, 4, 2) == []
++
++
++def test_name_sort_is_natural(tracks: list[SimpleNamespace]) -> None:
++    """Name sort is natural."""
++    assert _names(page_playlist_items(tracks, "name", None, 0, 10)) == [
++        "Black Or White",
++        "Jam",
++        "Track 2",
++        "Track 10",
++    ]
++
++
++def test_artist_album_duration_sorts(tracks: list[SimpleNamespace]) -> None:
++    """Artist album duration sorts."""
++    assert _names(page_playlist_items(tracks, "artist", None, 0, 1)) == ["Track 2"]
++    assert _names(page_playlist_items(tracks, "album", None, 0, 1)) == ["Track 2"]
++    assert _names(page_playlist_items(tracks, "duration", None, 0, 1)) == ["Track 10"]
++    assert _names(page_playlist_items(tracks, "duration_desc", None, 0, 1)) == ["Track 2"]
++
++
++def test_search_matches_title_album_or_first_artist_case_insensitively(
++    tracks: list[SimpleNamespace],
++) -> None:
++    """Search matches title album or first artist case insensitively."""
++    assert _names(page_playlist_items(tracks, "position", "JACKSON", 0, 10)) == [
++        "Jam",
++        "Black Or White",
++    ]
++    assert _names(page_playlist_items(tracks, "position", "track 1", 0, 10)) == ["Track 10"]
++    assert _names(page_playlist_items(tracks, "position", "dangerous", 0, 10)) == [
++        "Jam",
++        "Black Or White",
++    ]
++
++
++def test_unknown_order_falls_back_to_provider_order(tracks: list[SimpleNamespace]) -> None:
++    """Unknown order falls back to provider order."""
++    assert _names(page_playlist_items(tracks, "nonsense", None, 0, 1)) == ["Jam"]
++
++
++def test_items_without_artist_or_album_do_not_crash() -> None:
++    """Items without artist or album do not crash."""
++    bare = SimpleNamespace(
++        name="Radio", sort_name=None, artists=None, album=None, duration=None, position=None
++    )
++    assert page_playlist_items([bare], "artist", None, 0, 5) == [bare]
++    assert page_playlist_items([bare], "album", "x", 0, 5) == []
++
++
++def test_early_stop_only_for_provider_order_without_search() -> None:
++    """Early stop only for provider order without search."""
++    assert wants_early_stop("position", None) is True
++    assert wants_early_stop("position", "") is True
++    assert wants_early_stop("position_desc", None) is False
++    assert wants_early_stop("name", None) is False
++    assert wants_early_stop("position", "abc") is False
+-- 
+2.39.5 (Apple Git-154)
+

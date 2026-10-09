@@ -1,0 +1,88 @@
+From 7b61dc91ce02c04cb2da4bf7a31feda0256666f8 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Fri, 9 Oct 2026 11:20:26 +0300
+Subject: [PATCH] Page a playlist's tracks from the server
+
+Opening a big playlist fetched every track in one call. The listing now asks the
+server for 50 at a time (music/playlists/playlist_tracks_page), in the chosen order
+and with the search text, so the first screen no longer waits for the whole list.
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ src/plugins/api/index.ts      | 21 +++++++++++++++++++++
+ src/views/PlaylistDetails.vue | 11 +++++++----
+ 2 files changed, 28 insertions(+), 4 deletions(-)
+
+diff --git a/src/plugins/api/index.ts b/src/plugins/api/index.ts
+index 886b0d8..1b8e25b 100644
+--- a/src/plugins/api/index.ts
++++ b/src/plugins/api/index.ts
+@@ -882,6 +882,27 @@ export class MusicAssistantApi {
+     });
+   }
+ 
++  // one page of a playlist's items, sorted and searched on the server
++  public getPlaylistTracksPage(
++    item_id: string,
++    provider_instance_id_or_domain: string,
++    limit: number,
++    offset: number,
++    order_by: string,
++    search?: string,
++    force_refresh?: boolean,
++  ): Promise<(Track | Radio | PodcastEpisode | Audiobook)[]> {
++    return this.sendCommand("music/playlists/playlist_tracks_page", {
++      item_id,
++      provider_instance_id_or_domain,
++      limit,
++      offset,
++      order_by,
++      search: search || undefined,
++      force_refresh,
++    });
++  }
++
+   public addPlaylistTracks(
+     db_playlist_id: string | number,
+     uris: string[],
+diff --git a/src/views/PlaylistDetails.vue b/src/views/PlaylistDetails.vue
+index 4d1ea23..0e93402 100644
+--- a/src/views/PlaylistDetails.vue
++++ b/src/views/PlaylistDetails.vue
+@@ -50,7 +50,7 @@
+     :show-track-number="false"
+     :show-refresh-button="true"
+     :refresh-on-parent-update="true"
+-    :load-items="loadPlaylistTracks"
++    :load-paged-data="loadPlaylistTracksPage"
+     :sort-keys="[
+       'position',
+       'position_desc',
+@@ -65,7 +65,6 @@
+     :allow-key-hooks="true"
+     :path="`playlist.${props.itemId}.${props.provider}`"
+     :restore-state="true"
+-    :no-server-side-sorting="true"
+   />
+ 
+   <ProviderDetails v-if="itemDetails" :item-details="itemDetails" />
+@@ -147,10 +146,14 @@ onMounted(() => {
+   onBeforeUnmount(unsub);
+ });
+ 
+-const loadPlaylistTracks = async function (params: LoadDataParams) {
+-  return await api.getPlaylistTracks(
++const loadPlaylistTracksPage = async function (params: LoadDataParams) {
++  return await api.getPlaylistTracksPage(
+     props.itemId,
+     props.provider,
++    params.limit,
++    params.offset,
++    params.sortBy,
++    params.search,
+     params.refresh,
+   );
+ };
+-- 
+2.39.5 (Apple Git-154)
+

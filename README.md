@@ -25,6 +25,7 @@ https://github.com/ollisulopuisto/music-assistant-patched-repo
 | `patches/server/0003-show-notes.patch` | Gives episodes in the mixed browse folders their show notes |
 | `patches/server/0004-library-first-letter-jump.patch` | Lets a library listing start at a first letter and run on from there, as an indexed comparison on the name column the current sort uses |
 | `patches/server/0005-recommendations-layout.patch` | Lets a `recommendations_layout.json` in the data directory drop duplicate Discover rows (a Subsonic server's and the library's own), hide rows and put others first |
+| `patches/server/0006-playlist-tracks-page.patch` | Adds `music/playlists/playlist_tracks_page` (limit, offset, order, search) so a big playlist is read a page at a time; in provider order it stops reading the provider once the page is full |
 | `patches/server/0100-install-patched-frontend.patch` | Installs the locally built frontend wheel over the one upstream pins |
 | `patches/server/0110-app-vars-from-data-dir.patch` | Reads private app credentials from the add-on data directory |
 | `patches/server/0120-dsd-multichannel-pcm.patch` | Preserves multichannel PCM for capable players, standardizes six-channel PCM as 5.1(side), retains stereo output, and converts DSD to PCM |
@@ -35,6 +36,7 @@ https://github.com/ollisulopuisto/music-assistant-patched-repo
 | `patches/frontend/0001-forbid-forms.patch` | Stops provider metadata rendering form controls (a feed-supplied `<form>` was a working phishing box) |
 | `patches/frontend/0002-show-notes.patch` | Shows an episode's notes in the list subtitle and in the fullscreen player's side panel, where lyrics go |
 | `patches/frontend/0003-alphabet-jump.patch` | Puts an A-Z strip above every library listing, so a big library is reachable without scrolling through it |
+| `patches/frontend/0004-playlist-tracks-page.patch` | Playlist contents load 50 at a time from that command, sorted and searched on the server, instead of all at once |
 
 Patches with an upstream pull request should be removed when that change is merged;
 the next build will pick it up from upstream instead.

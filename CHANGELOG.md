@@ -8,6 +8,14 @@ which the build writes.
 
 ## [Unreleased]
 
+Waiting for the next publish build (patches are committed, not pushed):
+
+- Opening a big playlist no longer loads every track at once. The contents load 50 at a
+  time from a new server command, `music/playlists/playlist_tracks_page`, in the chosen
+  order and with the search text. Untested in a browser: the scroll loading needs a look
+  on the running add-on. Not covered: "select all" on a paged playlist skips its
+  confirmation prompt (the total is unknown), and album-disc grouping is off in that view.
+
 Repository and tooling only; none of this changes the add-on image.
 
 - Licensed under Apache-2.0 (matching upstream). Patches to Navidrome stay GPL-3.0
