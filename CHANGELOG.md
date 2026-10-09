@@ -8,6 +8,8 @@ which the build writes.
 
 ## [Unreleased]
 
+Upstream 2.10.6 (9.10.2026): `0122-preserve-dsd-stereo-downmix.patch` re-based, its `test_ffmpeg.py` hunk no longer applied; all 14 server and 4 frontend patches apply and the affected tests pass on 2.10.6.
+
 Waiting for the next publish build (patches are committed, not pushed):
 
 - A-Z strip on a playlist's tracks when sorted by name (jump to a letter, scroll up and down from it), same strip as artists and albums.

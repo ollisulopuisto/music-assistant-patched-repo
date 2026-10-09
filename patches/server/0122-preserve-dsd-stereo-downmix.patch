@@ -1,9 +1,9 @@
 Subject: [PATCH] Preserve direct DSD stereo downmix gain
 diff --git a/music_assistant/controllers/streams/audio_analysis.py b/music_assistant/controllers/streams/audio_analysis.py
-index 091852c..374a025 100644
+index 4230e48..8ee8713 100644
 --- a/music_assistant/controllers/streams/audio_analysis.py
 +++ b/music_assistant/controllers/streams/audio_analysis.py
-@@ -1542,6 +1542,7 @@ class AudioAnalysisController:
+@@ -1546,6 +1546,7 @@ class AudioAnalysisController:
                      audio_input=_iter_input_chunks(),
                      input_format=input_format,
                      output_format=analysis_format,
@@ -12,10 +12,10 @@ index 091852c..374a025 100644
                      pending.extend(chunk)
                      while len(pending) >= pcm_bytes_per_second:
 diff --git a/music_assistant/controllers/streams/audio_buffer.py b/music_assistant/controllers/streams/audio_buffer.py
-index 87c5f3b..f6478c9 100644
+index 9894aff..e7da3ff 100644
 --- a/music_assistant/controllers/streams/audio_buffer.py
 +++ b/music_assistant/controllers/streams/audio_buffer.py
-@@ -89,6 +89,7 @@ class AudioBuffer:
+@@ -91,6 +91,7 @@ class AudioBuffer:
          mode: BufferMode = BufferMode.SEEKABLE,
          ready_threshold: int = 1,
          is_realtime: bool = False,
@@ -23,7 +23,7 @@ index 87c5f3b..f6478c9 100644
      ) -> None:
          """
          Initialize AudioBuffer.
-@@ -98,9 +99,12 @@ class AudioBuffer:
+@@ -100,9 +101,12 @@ class AudioBuffer:
          :param mode: Buffer mode (SEEKABLE for tracks, ROLLING for radio).
          :param ready_threshold: Seconds of audio to buffer before signaling ready.
          :param is_realtime: Whether the source hands its audio over at playback pace.
@@ -36,7 +36,7 @@ index 87c5f3b..f6478c9 100644
          configured_max_size = (
              RADIO_BUFFER_SIZE if mode == BufferMode.ROLLING else BUFFER_SIZE_MAP[buffer_size]
          )
-@@ -318,6 +322,7 @@ class AudioBuffer:
+@@ -320,6 +324,7 @@ class AudioBuffer:
              input_format=self.pcm_format,
              output_format=output_format,
              filter_params=filter_params,
@@ -44,7 +44,7 @@ index 87c5f3b..f6478c9 100644
          ):
              yield chunk
  
-@@ -878,6 +883,10 @@ def _new_buffer(
+@@ -888,6 +893,10 @@ def _new_buffer(
          mode,
          ready_threshold=ready_threshold,
          is_realtime=streamdetails.is_realtime,
@@ -55,7 +55,7 @@ index 87c5f3b..f6478c9 100644
      )
      # align chunk numbering with the actual stream start position so that
      # get_raw_stream(seek_position_ms) requests the correct chunk number
-@@ -917,14 +926,24 @@ def _buffer_pcm_format(streamdetails: StreamDetails) -> AudioFormat:
+@@ -927,14 +936,24 @@ def _buffer_pcm_format(streamdetails: StreamDetails) -> AudioFormat:
      """
      arriving = arriving_audio_format(streamdetails)
      sample_rate = preferred_pcm_sample_rate(arriving)
@@ -84,7 +84,7 @@ index 87c5f3b..f6478c9 100644
          bit_depth=bit_depth,
          channels=min(arriving.channels, 8),
 diff --git a/music_assistant/helpers/ffmpeg.py b/music_assistant/helpers/ffmpeg.py
-index a1266de..d9c22e2 100644
+index 5e93278..e6612fd 100644
 --- a/music_assistant/helpers/ffmpeg.py
 +++ b/music_assistant/helpers/ffmpeg.py
 @@ -106,6 +106,7 @@ class FFMpeg(AsyncProcess):
@@ -103,7 +103,7 @@ index a1266de..d9c22e2 100644
          )
          self.audio_input = audio_input
          self.input_format = input_format
-@@ -405,6 +407,7 @@ async def get_ffmpeg_stream(
+@@ -403,6 +405,7 @@ async def get_ffmpeg_stream(
      chunk_size: int | None = None,
      extra_input_args: list[str] | None = None,
      extra_output_args: list[str] | None = None,
@@ -111,7 +111,7 @@ index a1266de..d9c22e2 100644
  ) -> AsyncGenerator[bytes]:
      """
      Get the ffmpeg audio stream as async generator.
-@@ -420,6 +423,7 @@ async def get_ffmpeg_stream(
+@@ -418,6 +421,7 @@ async def get_ffmpeg_stream(
          extra_input_args=extra_input_args,
          extra_output_args=extra_output_args,
          collect_log_history=True,
@@ -119,7 +119,7 @@ index a1266de..d9c22e2 100644
      ) as ffmpeg_proc:
          # read final chunks from stdout
          iterator = ffmpeg_proc.iter_chunked(chunk_size) if chunk_size else ffmpeg_proc.iter_any()
-@@ -526,6 +530,7 @@ def get_ffmpeg_args(
+@@ -524,6 +528,7 @@ def get_ffmpeg_args(
      extra_input_args: list[str] | None = None,
      extra_output_args: list[str] | None = None,
      loglevel: str = "error",
@@ -127,7 +127,7 @@ index a1266de..d9c22e2 100644
  ) -> list[str]:
      """Collect all args to send to the ffmpeg process."""
      filter_params = list(filter_params)
-@@ -656,7 +661,9 @@ def get_ffmpeg_args(
+@@ -661,7 +666,9 @@ def get_ffmpeg_args(
  
      # runs ahead of the caller's own filters, so channel-aware ones such as the
      # per-channel preamp see the conformed layout instead of the source layout
@@ -138,7 +138,7 @@ index a1266de..d9c22e2 100644
          filter_params = [channel_filter, *filter_params]
  
      if resample_filter := get_ffmpeg_resample_filter(
-@@ -785,16 +792,25 @@ def _get_channel_layout_name(channels: int) -> str | None:
+@@ -790,16 +797,25 @@ def _get_channel_layout_name(channels: int) -> str | None:
      return None
  
  
@@ -168,7 +168,7 @@ index a1266de..d9c22e2 100644
          # a single channel output needs this fold too, otherwise a mono/left/right pan
          # would only see the front channels and silently drop the center and surround.
          # aformat leaves the rematrix to ffmpeg, which picks the correct coefficients
-@@ -802,7 +818,7 @@ def _get_channel_conform_filter(input_channels: int, output_channels: int) -> st
+@@ -807,7 +823,7 @@ def _get_channel_conform_filter(input_channels: int, output_channels: int) -> st
          # scales them to stay clip-safe). A fixed pan expression, naming channels that
          # a given layout may not even have, can do neither.
          return "aformat=channel_layouts=stereo"
@@ -190,10 +190,10 @@ index f958c2b..fe2e3ae 100644
          assert input_format.channels == 6
          assert output_format.channels == 2
 diff --git a/tests/controllers/streams/test_audio_buffer.py b/tests/controllers/streams/test_audio_buffer.py
-index c5c1baa..b4dc704 100644
+index 0edaea9..6b53592 100644
 --- a/tests/controllers/streams/test_audio_buffer.py
 +++ b/tests/controllers/streams/test_audio_buffer.py
-@@ -142,8 +142,14 @@ def test_high_resolution_multichannel_buffer_is_memory_capped() -> None:
+@@ -143,8 +143,14 @@ def test_high_resolution_multichannel_buffer_is_memory_capped() -> None:
      assert buf.max_size_seconds * pcm_format.pcm_sample_size <= MAX_BUFFER_SIZE_BYTES
  
  
@@ -210,7 +210,7 @@ index c5c1baa..b4dc704 100644
      streamdetails = MagicMock()
      streamdetails.decoded_audio_format = None
      streamdetails.audio_format = AudioFormat(
-@@ -151,15 +157,15 @@ def test_dsd_buffer_format_uses_decoded_pcm_size_and_rate() -> None:
+@@ -152,15 +158,15 @@ def test_dsd_buffer_format_uses_decoded_pcm_size_and_rate() -> None:
          codec_type=ContentType.DSD_LSBF_PLANAR,
          sample_rate=352800,
          bit_depth=1,
@@ -231,7 +231,7 @@ index c5c1baa..b4dc704 100644
  
  @pytest.mark.asyncio
 diff --git a/tests/helpers/test_ffmpeg.py b/tests/helpers/test_ffmpeg.py
-index 44f20ba..a0573dd 100644
+index 9384a51..c164a9b 100644
 --- a/tests/helpers/test_ffmpeg.py
 +++ b/tests/helpers/test_ffmpeg.py
 @@ -58,12 +58,35 @@ def test_get_ffmpeg_args_does_not_mutate_filters() -> None:
@@ -292,4 +292,4 @@ index 44f20ba..a0573dd 100644
 +    assert filter_graph.index(conform_filter) < filter_graph.index("pan=mono|c0=0.5*FL+0.5*FR")
  
  
- def _split_at_input(args: list[str]) -> tuple[list[str], list[str]]:
+ _PCM_OUT = AudioFormat(
