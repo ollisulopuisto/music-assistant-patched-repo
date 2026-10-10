@@ -1,0 +1,104 @@
+From: Claude <noreply@anthropic.com>
+Subject: [PATCH] Test the first-letter jump on the playlists listing
+
+The jump is shared library_items code, but only artists, albums and the other
+listings were covered. Playlists can number in the hundreds (every Spotify playlist
+is mirrored into the library), so a test pins that a letter filters them too.
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+diff --git a/tests/controllers/music/test_playlists_first_letter_jump.py b/tests/controllers/music/test_playlists_first_letter_jump.py
+new file mode 100644
+index 0000000..a03cf40
+--- /dev/null
++++ b/tests/controllers/music/test_playlists_first_letter_jump.py
+@@ -0,0 +1,89 @@
++"""
++Tests for the first-letter jump on the library playlists listing.
++
++Playlists can number in the hundreds (every Spotify playlist is mirrored into the
++library), so the playlists listing needs the same A-Z jump as artists and albums.
++"""
++
++from __future__ import annotations
++
++from uuid import uuid4
++
++import pytest
++from music_assistant_models.enums import MediaType
++from music_assistant_models.media_items import Playlist, ProviderMapping
++
++from music_assistant.mass import MusicAssistant
++
++pytestmark = pytest.mark.asyncio
++
++SEEDED_PLAYLISTS = [
++    "Zen Garden",
++    "Alpha Mix",
++    "Ärtig Evening",
++    "1999 Party",
++    "Mirror Songs",
++    "Mango Tunes",
++    "Road Trip",
++]
++
++
++def _mapping() -> ProviderMapping:
++    """Create a provider mapping with a unique provider item id."""
++    return ProviderMapping(
++        item_id=uuid4().hex,
++        provider_domain="prov_a",
++        provider_instance="prov_a_inst",
++        in_library=True,
++    )
++
++
++@pytest.fixture(scope="module")
++async def lettered_mass(music_mass_module: MusicAssistant) -> MusicAssistant:
++    """Return a database-only instance seeded with the playlists above."""
++    for name in SEEDED_PLAYLISTS:
++        await music_mass_module.music.playlists.add_item_to_library(
++            Playlist(
++                item_id="0",
++                provider="library",
++                name=name,
++                owner="test",
++                is_editable=False,
++                provider_mappings={_mapping()},
++            )
++        )
++    return music_mass_module
++
++
++async def _names(mass: MusicAssistant, **kwargs: object) -> list[str]:
++    """Return the names of the library playlists matching the given listing arguments."""
++    return [item.name for item in await mass.music.playlists.library_items(**kwargs)]
++
++
++async def test_a_jump_starts_at_the_letter_and_runs_on(lettered_mass: MusicAssistant) -> None:
++    """A jump to M opens at the first playlist filed under M and keeps going."""
++    assert await _names(lettered_mass, starts_from="m", order_by="name") == [
++        "Mango Tunes",
++        "Mirror Songs",
++        "Road Trip",
++        "Zen Garden",
++    ]
++
++
++async def test_diacritics_and_case_are_folded(lettered_mass: MusicAssistant) -> None:
++    """A jump to A reaches the accented name, and the letter's case does not matter."""
++    from_a = await _names(lettered_mass, starts_from="A", order_by="name")
++    assert "Ärtig Evening" in from_a
++    assert "1999 Party" not in from_a  # digits sort above A
++
++
++async def test_the_page_above_a_jump_is_nearest_first(lettered_mass: MusicAssistant) -> None:
++    """Reverse order with starts_before walks up out of the jump, nearest first."""
++    above = await _names(lettered_mass, starts_before="m", order_by="name_desc")
++    assert above[:3] == ["Ärtig Evening", "Alpha Mix", "1999 Party"]
++
++
++async def test_media_type_is_playlist(lettered_mass: MusicAssistant) -> None:
++    """The seeded items really are playlists in the playlists table."""
++    items = await lettered_mass.music.playlists.library_items(order_by="name")
++    assert {i.media_type for i in items} == {MediaType.PLAYLIST}

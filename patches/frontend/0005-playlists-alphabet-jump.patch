@@ -1,0 +1,31 @@
+From 15a3c3c3b65d01009563cb02279cc5c978a64b07 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Sat, 10 Oct 2026 13:26:19 +0300
+Subject: [PATCH] Show the A-Z strip on the playlists listing
+
+Every library listing with a name order has the strip except playlists, which kept
+its header pinned but left the strip out. A library that mirrors a streaming account
+can hold hundreds of playlists, so jumping to a letter matters there too. The server
+already filters playlists by letter through the shared library_items query, and the
+view already passes startsFrom/startsBefore along; only the switch was missing.
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ src/views/LibraryPlaylists.vue | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/src/views/LibraryPlaylists.vue b/src/views/LibraryPlaylists.vue
+index b1ece83..994b4eb 100644
+--- a/src/views/LibraryPlaylists.vue
++++ b/src/views/LibraryPlaylists.vue
+@@ -9,6 +9,7 @@
+     :load-paged-data="loadItems"
+     :show-library="true"
+     :sort-keys="sortKeys"
++    :show-alphabet-jump="true"
+     :pin-listing-header="true"
+     :update-available="updateAvailable"
+     :title="$t('playlists')"
+-- 
+2.39.5 (Apple Git-154)
+
