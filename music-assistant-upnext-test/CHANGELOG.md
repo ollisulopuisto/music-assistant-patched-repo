@@ -5,6 +5,83 @@ Music Assistant, rebuilt from upstream's own release with the patches in
 applied. Each entry names the upstream release it carries and the patches on top
 of it.
 
+## 2.10.6-upnext.3
+
+Built from [Music Assistant 2.10.6](https://github.com/music-assistant/server/releases/tag/2.10.6), with these patches applied:
+
+- **server** — Surface the Pocket Casts Up Next queue as a podcast
+- **server** — Stop re-asking Pocket Casts for the same account-wide status
+- **server** — Give the browse folders their episodes' show notes
+- **server** — Let a library listing start at a first letter
+- **server** — Let a layout file drop duplicate recommendation rows, hide
+- **server** — Add a paged playlist contents command
+- **server** — Let loudness analysis be disabled
+- **server** — Test the first-letter jump on the playlists listing
+- **server** — Install the patched frontend wheel over the pinned one
+- **server** — Look for a user-supplied app_vars.json in the add-on data directory
+- **server** — Preserve multichannel PCM and convert DSD safely
+- **server** — Recognize DFF streams as DSD for PCM buffer accounting
+- **server** — Preserve direct DSD stereo downmix gain
+- **server** — Test MPD high-resolution multichannel settings
+- **server** — Add HVSC SID rendering provider with stereo widening
+- **server** — Build the upstream sidplayfp CLI with SIDLite for the runtime image
+- **frontend** — Refuse to render form controls from metadata markdown
+- **frontend** — Show a podcast episode's show notes where lyrics go
+- **frontend** — Add an A-Z strip to selected library listings
+- **frontend** — Page a playlist's tracks from the server, with an A-Z strip
+- **frontend** — Show the A-Z strip on the playlists listing
+
+### Upstream release notes for 2.10.6
+
+#### 📦 Stable Release
+
+_Changes since [2.10.5](https://github.com/music-assistant/server/releases/tag/2.10.5)_
+
+##### 🚀 Features and enhancements
+
+- Run manually triggered tasks next in the background task queue (by @OzGav in #6764)
+
+##### 🐛 Bugfixes
+
+- Fix queue stalling after one track when current item is briefly unset (by @bcl79 in #6110)
+- Pause, resume and skip Spotify Connect on DLNA speakers (by @MarvinSchenkel in #6609)
+- Keep HEOS players playing while they restart on a new stream (by @MarvinSchenkel in #6611)
+- Fix parsing of artists in YouTube Music recommendations (by @NasaGeek in #6677)
+- Pick provider mappings by availability and priority in _select_provider_id (stable) (by @OzGav in #6679)
+- Stop placeholder ISRCs from merging unrelated tracks (by @OzGav in #6691)
+- Keep the last played position when a player pauses (by @fmunkes in #6693)
+- Stop Apple Music from adding empty duplicates of albums that lack a catalog link (by @MarvinSchenkel in #6702)
+- Fix sync group picking a lights-only member as leader (by @MarvinSchenkel in #6707)
+- Play Sendspin audio at the music's own sample rate (by @marcelveldt in #6709)
+- Drop thumbnails from YouTube Music less frequently (by @NasaGeek in #6721)
+- Keep favorite tracks of multiple Tidal accounts apart in the library (by @MarvinSchenkel in #6726)
+- Fix audiobooks not starting when resuming deep into a long mp3 (by @MarvinSchenkel in #6727)
+- Fix personalized NetEase endpoints returning wrong data on some NCM API backends (by @Kiranwin in #6730)
+- Revoke guest access when the party or music quiz plugin is disabled (by @MarvinSchenkel in #6747)
+- Bind the playlog lookup parameters (by @MarvinSchenkel in #6751)
+- Deezer: Fix Family profiles showing the admin's library (by @jdaberkow in #6753)
+- Refuse CIFS usernames and shares that would add mount options (by @MarvinSchenkel in #6756)
+- Fix Sendspin players not marking items played when playback starts near the end (by @maximmaxim345 in #6770)
+- Restrict what the image loader hands to ffmpeg (by @MarvinSchenkel in #6771)
+- Require the Supervisor as peer for Home Assistant Ingress requests (by @MarvinSchenkel in #6772)
+- Show Apple Music names in the user's language (by @MarvinSchenkel in #6775)
+- Stop a Sonos from playing music again after the queue has finished (by @marcelveldt in #6782)
+- Fix album covers not loading when archive.org is slow or down (by @OzGav in #6787)
+
+##### Other Changes
+
+- Only allow releases to be started from the dev branch (stable) (by @marcelveldt in #6674)
+
+##### 🧰 Maintenance and dependency bumps
+
+- Fix release notes listing changes that did not ship in a stable patch release (by @marcelveldt in #6672)
+
+#### :bow: Thanks to our contributors
+
+Special thanks to the following contributors who helped with this release:
+
+@Kiranwin, @MarvinSchenkel, @NasaGeek, @OzGav, @bcl79, @fmunkes, @jdaberkow, @marcelveldt, @maximmaxim345
+
 ## 2.10.6-upnext.2
 
 Built from [Music Assistant 2.10.6](https://github.com/music-assistant/server/releases/tag/2.10.6), with these patches applied:
