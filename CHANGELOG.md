@@ -12,6 +12,8 @@ Upstream 2.10.6 (9.10.2026): `0122-preserve-dsd-stereo-downmix.patch` re-based, 
 
 Waiting for the next publish build (patches are committed, not pushed):
 
+- Loudness Analysis can now be disabled (Settings > Audio analysis > Loudness Analysis > Disable). It reads whole files through the media server, and the user does not use volume normalisation. Tracks that already have stored loudness keep it.
+
 - A-Z strip on a playlist's tracks when sorted by name (jump to a letter, scroll up and down from it), same strip as artists and albums.
 
 - Opening a big playlist no longer loads every track at once. The contents load 50 at a

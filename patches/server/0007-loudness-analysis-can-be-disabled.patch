@@ -1,0 +1,74 @@
+From dc782acf994e1573fbf64198c74e93db416d4b99 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Sat, 10 Oct 2026 09:58:12 +0300
+Subject: [PATCH] Let loudness analysis be disabled
+
+Loudness analysis is a builtin provider with allow_disable false, so the UI greys
+out "Disable" and the nightly background scan plus the pass during playback always
+run. Both read whole files, which is a real cost when the library lives behind a
+Subsonic server. Users who do not use volume normalisation had no way to stop it.
+
+allow_disable is now true. Disabling unloads the provider, which removes it from
+the audio analysis controller's provider list, so no scan and no playback pass
+runs; tracks that already have stored loudness keep it, and it is still loaded by
+default.
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ .../providers/loudness_analysis/manifest.json |  2 +-
+ .../test_loudness_analysis_manifest.py        | 30 +++++++++++++++++++
+ 2 files changed, 31 insertions(+), 1 deletion(-)
+ create mode 100644 tests/providers/test_loudness_analysis_manifest.py
+
+diff --git a/music_assistant/providers/loudness_analysis/manifest.json b/music_assistant/providers/loudness_analysis/manifest.json
+index 59a22a6..7ba1a26 100644
+--- a/music_assistant/providers/loudness_analysis/manifest.json
++++ b/music_assistant/providers/loudness_analysis/manifest.json
+@@ -7,7 +7,7 @@
+   "requirements": [],
+   "multi_instance": false,
+   "builtin": true,
+-  "allow_disable": false,
++  "allow_disable": true,
+   "icon": "volume-high",
+   "documentation": "https://music-assistant.io/audio-analysis/loudness-analysis/"
+ }
+diff --git a/tests/providers/test_loudness_analysis_manifest.py b/tests/providers/test_loudness_analysis_manifest.py
+new file mode 100644
+index 0000000..5823146
+--- /dev/null
++++ b/tests/providers/test_loudness_analysis_manifest.py
+@@ -0,0 +1,30 @@
++"""Tests for the loudness analysis provider manifest."""
++
++from __future__ import annotations
++
++import json
++import pathlib
++
++import music_assistant.providers.loudness_analysis as loudness_package
++
++
++def _manifest() -> dict[str, object]:
++    path = pathlib.Path(loudness_package.__file__).parent / "manifest.json"
++    return json.loads(path.read_text())
++
++
++def test_loudness_analysis_can_be_disabled() -> None:
++    """
++    Loudness analysis reads whole files; users who do not normalise volume can switch it off.
++
++    Disabling unloads the provider, so no background scan and no analysis during playback runs;
++    tracks that already have stored loudness keep it.
++    """
++    assert _manifest()["allow_disable"] is True
++
++
++def test_loudness_analysis_stays_builtin() -> None:
++    """It is still a builtin provider, loaded by default and listed under audio analysis."""
++    manifest = _manifest()
++    assert manifest["builtin"] is True
++    assert manifest["type"] == "audio_analysis"
+-- 
+2.39.5 (Apple Git-154)
+
