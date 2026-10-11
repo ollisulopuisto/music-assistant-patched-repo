@@ -1,0 +1,469 @@
+From 8960499335a661c74a7a7f71aaeecbc341e48cd2 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Sun, 11 Oct 2026 10:03:35 +0000
+Subject: [PATCH] Numbered jump strip for long playlists in their own order
+
+A playlist sorted by position has no letters to jump by, so a long one could only
+be paged through. Above one page of items, the playlist now shows a strip with a
+chip per page (1, 51, 101, ...). Tapping a chip loads from that offset and scrolls
+the listing to it, and paging continues from there.
+
+The strip needs the playlist's length, so the view counts it alongside the first
+page and passes it down as the listing total. The strip stays hidden for other
+sorts (the A-Z strip covers name orders) and while a search narrows the list.
+---
+ src/components/ItemsListing.vue      | 52 ++++++++++++++++-
+ src/components/PageJumpBar.vue       | 85 ++++++++++++++++++++++++++++
+ src/helpers/page_jump.ts             | 45 +++++++++++++++
+ src/plugins/api/index.ts             | 13 +++++
+ src/translations/en.json             |  1 +
+ src/views/PlaylistDetails.vue        | 30 ++++++++++
+ tests/components/PageJumpBar.test.ts | 46 +++++++++++++++
+ tests/helpers/page_jump.test.ts      | 49 ++++++++++++++++
+ 8 files changed, 320 insertions(+), 1 deletion(-)
+ create mode 100644 src/components/PageJumpBar.vue
+ create mode 100644 src/helpers/page_jump.ts
+ create mode 100644 tests/components/PageJumpBar.test.ts
+ create mode 100644 tests/helpers/page_jump.test.ts
+
+diff --git a/src/components/ItemsListing.vue b/src/components/ItemsListing.vue
+index 2919c1a..cbf5bc4 100644
+--- a/src/components/ItemsListing.vue
++++ b/src/components/ItemsListing.vue
+@@ -8,7 +8,8 @@
+       class="listing-header"
+       :class="{
+         'listing-header--pinned':
+-          (alphabetJumpAvailable || props.pinListingHeader) && expanded,
++          (alphabetJumpAvailable || pageJumpShown || props.pinListingHeader) &&
++          expanded,
+       }"
+     >
+     <!-- eslint-disable vue/no-template-shadow -->
+@@ -100,6 +101,14 @@
+       @jump="jumpToLetter"
+     />
+ 
++    <PageJumpBar
++      v-if="pageJumpShown && expanded"
++      :offsets="pageJumpChips"
++      :active="activePageOffset"
++      :disabled="loading"
++      @jump="jumpToPage"
++    />
++
+     </div>
+     <Container
+       v-if="expanded"
+@@ -355,12 +364,14 @@
+ import type { Component } from "vue";
+ 
+ import AlphabetJumpBar from "@/components/AlphabetJumpBar.vue";
++import PageJumpBar from "@/components/PageJumpBar.vue";
+ import {
+   bucketOf,
+   earlierPageParams,
+   NAME_SORT_KEYS,
+   TOP_BUCKET,
+ } from "@/helpers/alphabet_jump";
++import { pageJumpAvailable, pageJumpOffsets } from "@/helpers/page_jump";
+ import Container from "@/components/Container.vue";
+ import GenreIcon from "@/components/icons/GenreIcon.vue";
+ import ListViewSkeleton from "@/components/skeletons/ListViewSkeleton.vue";
+@@ -506,6 +517,8 @@ export interface Props {
+   showLibraryOnlyFilter?: boolean;
+   showGenreFilter?: boolean;
+   showAlphabetJump?: boolean;
++  // numbered strip for a long listing in its own order; needs total to be passed
++  showPageJump?: boolean;
+   pinListingHeader?: boolean;
+   showHideEmptyFilter?: boolean;
+   showHideFullyPlayedFilter?: boolean;
+@@ -557,6 +570,7 @@ const props = withDefaults(defineProps<Props>(), {
+   showLibraryOnlyFilter: false,
+   showGenreFilter: false,
+   showAlphabetJump: false,
++  showPageJump: false,
+   pinListingHeader: false,
+   showHideEmptyFilter: false,
+   showHideFullyPlayedFilter: false,
+@@ -1016,6 +1030,42 @@ const alphabetJumpAvailable = computed(
+   () => props.showAlphabetJump && NAME_SORT_KEYS.includes(params.value.sortBy),
+ );
+ 
++// The numbered strip for a long playlist in its own order: one chip per page, so the far end
++// of the list is reachable without paging through it. It needs the total, which the parent
++// passes in, and it is hidden while a search narrows the list.
++const pageJumpShown = computed(
++  () =>
++    props.showPageJump &&
++    pageJumpAvailable({
++      sortBy: params.value.sortBy,
++      search: params.value.search,
++      total: props.total,
++      pageSize: props.limit,
++    }),
++);
++const pageJumpChips = computed(() =>
++  pageJumpShown.value ? pageJumpOffsets(props.total ?? 0, props.limit) : [],
++);
++// the page the listing was last jumped to, which the strip marks
++const activePageOffset = ref(0);
++
++/**
++ * Replace the listing with the page starting at offset, then scroll to it.
++ *
++ * Paging on from there goes through loadNextPage as usual, since params.offset now sits at
++ * the page the jump landed on.
++ */
++const jumpToPage = async function (offset: number) {
++  // loadData drops a call made while another load runs, so clearing the list now would leave
++  // it empty; the strip is disabled while loading, so this only guards a race
++  if (loading.value) return;
++  activePageOffset.value = offset;
++  allItemsReceived.value = false;
++  pagedItems.value = [];
++  await loadData(false, false, false, offset);
++  scrollListingIntoView();
++};
++
+ // The bucket of whatever item is currently under the strip, once the listing has been
+ // scrolled. Until then there is nothing to read, and the strip marks where the listing
+ // begins instead.
+diff --git a/src/components/PageJumpBar.vue b/src/components/PageJumpBar.vue
+new file mode 100644
+index 0000000..9161042
+--- /dev/null
++++ b/src/components/PageJumpBar.vue
+@@ -0,0 +1,85 @@
++<template>
++  <div
++    class="page-jump-bar"
++    role="navigation"
++    :aria-label="$t('tooltip.jump_to_page')"
++  >
++    <button
++      v-for="offset in offsets"
++      :key="offset"
++      type="button"
++      class="page-jump-bar__chip"
++      :class="{ 'page-jump-bar__chip--active': offset === active }"
++      :aria-current="offset === active ? 'true' : undefined"
++      :disabled="disabled"
++      @click="emit('jump', offset)"
++    >
++      {{ offset + 1 }}
++    </button>
++  </div>
++</template>
++
++<script setup lang="ts">
++/**
++ * The numbered strip that jumps a long playlist to a page of its items.
++ *
++ * One chip per page, labelled with the position of its first item (1, 51, 101, ...). It sits
++ * in the listing header with the A-Z strip's look, and scrolls sideways when there are many.
++ */
++defineProps<{
++  /** The offset each chip jumps to, from the top of the listing. */
++  offsets: number[];
++  /** The offset of the chip to mark as where the listing is, if any. */
++  active?: number;
++  /** Greys the strip out while the listing it drives is busy. */
++  disabled?: boolean;
++}>();
++
++const emit = defineEmits<{
++  (e: "jump", offset: number): void;
++}>();
++</script>
++
++<style scoped>
++.page-jump-bar {
++  display: flex;
++  align-items: center;
++  gap: 4px;
++  padding: 4px 10px;
++  border-bottom: 1px solid rgba(var(--v-border-color), var(--v-border-opacity));
++  overflow-x: auto;
++  scrollbar-width: none;
++}
++
++.page-jump-bar::-webkit-scrollbar {
++  display: none;
++}
++
++.page-jump-bar__chip {
++  flex: 0 0 auto;
++  min-width: 32px;
++  padding: 2px 8px;
++  border-radius: 4px;
++  font-size: 0.75rem;
++  line-height: 1.25rem;
++  font-variant-numeric: tabular-nums;
++  color: rgb(var(--v-theme-on-surface));
++  opacity: 0.6;
++}
++
++.page-jump-bar__chip:hover:not(:disabled) {
++  opacity: 1;
++  background-color: rgba(var(--v-theme-on-surface), 0.08);
++}
++
++.page-jump-bar__chip--active {
++  opacity: 1;
++  font-weight: 700;
++  background-color: rgba(var(--v-theme-primary), 0.16);
++  color: rgb(var(--v-theme-primary));
++}
++
++.page-jump-bar__chip:disabled {
++  opacity: 0.3;
++}
++</style>
+diff --git a/src/helpers/page_jump.ts b/src/helpers/page_jump.ts
+new file mode 100644
+index 0000000..252a350
+--- /dev/null
++++ b/src/helpers/page_jump.ts
+@@ -0,0 +1,45 @@
++/** Helpers for the numbered strip that jumps a long playlist to a page of its items. */
++
++/** The sort keys a page number means anything under: the playlist's own order. */
++export const POSITION_SORT_KEYS = ["position", "position_desc"];
++
++/**
++ * Return the offset each chip of the strip jumps to: one per page of the listing.
++ *
++ * :param total: How many items the listing holds.
++ * :param pageSize: How many items a page loads.
++ */
++export function pageJumpOffsets(total: number, pageSize: number): number[] {
++  const offsets: number[] = [];
++  for (let offset = 0; offset < total; offset += pageSize) {
++    offsets.push(offset);
++  }
++  return offsets;
++}
++
++/**
++ * Return whether the numbered strip is useful for a listing.
++ *
++ * It is only meaningful in the playlist's own order, without a search (a search makes the
++ * total wrong), and only when there is more than one page to jump between.
++ *
++ * :param args.sortBy: The sort key the listing is using.
++ * :param args.search: The search text, if any.
++ * :param args.total: The number of items in the playlist, if known.
++ * :param args.pageSize: How many items a page loads.
++ */
++export function pageJumpAvailable({
++  sortBy,
++  search,
++  total,
++  pageSize,
++}: {
++  sortBy: string;
++  search?: string;
++  total?: number;
++  pageSize: number;
++}): boolean {
++  if (!POSITION_SORT_KEYS.includes(sortBy)) return false;
++  if (search) return false;
++  return total !== undefined && total > pageSize;
++}
+diff --git a/src/plugins/api/index.ts b/src/plugins/api/index.ts
+index 95fc919..e645f0c 100644
+--- a/src/plugins/api/index.ts
++++ b/src/plugins/api/index.ts
+@@ -907,6 +907,19 @@ export class MusicAssistantApi {
+     });
+   }
+ 
++  // how many items a playlist holds, for the numbered jump strip
++  public getPlaylistTracksCount(
++    item_id: string,
++    provider_instance_id_or_domain: string,
++    force_refresh?: boolean,
++  ): Promise<number> {
++    return this.sendCommand("music/playlists/playlist_tracks_count", {
++      item_id,
++      provider_instance_id_or_domain,
++      force_refresh,
++    });
++  }
++
+   public addPlaylistTracks(
+     db_playlist_id: string | number,
+     uris: string[],
+diff --git a/src/translations/en.json b/src/translations/en.json
+index 5692756..0e6d4d6 100644
+--- a/src/translations/en.json
++++ b/src/translations/en.json
+@@ -920,6 +920,7 @@
+         "show_empty_genres": "Show empty genres",
+         "filter_genre": "Filter by genre",
+         "jump_to_letter": "Jump to a letter",
++        "jump_to_page": "Jump to a position in the playlist",
+         "show_only_default_genres": "Show only default genres",
+         "show_all_genres": "Show all genres",
+         "filter_hide_fully_played": "Hide fully-played episodes",
+diff --git a/src/views/PlaylistDetails.vue b/src/views/PlaylistDetails.vue
+index 9dbf2e5..7bc8949 100644
+--- a/src/views/PlaylistDetails.vue
++++ b/src/views/PlaylistDetails.vue
+@@ -52,6 +52,8 @@
+     :refresh-on-parent-update="true"
+     :load-paged-data="loadPlaylistTracksPage"
+     :show-alphabet-jump="true"
++    :show-page-jump="true"
++    :total="playlistTotal"
+     :sort-keys="[
+       'position',
+       'position_desc',
+@@ -147,7 +149,35 @@ onMounted(() => {
+   onBeforeUnmount(unsub);
+ });
+ 
++// how many items the playlist holds, for the numbered jump strip; undefined until counted
++const playlistTotal = ref<number>();
++// the playlist the count was last asked for, so a new search or sort does not count it again
++let countedItemId: string | undefined;
++
++const refreshPlaylistTotal = function (forceRefresh?: boolean) {
++  const itemId = props.itemId;
++  countedItemId = itemId;
++  api
++    .getPlaylistTracksCount(itemId, props.provider, forceRefresh)
++    .then((count) => {
++      // the route may have moved on to another playlist while the count was read
++      if (itemId === props.itemId) playlistTotal.value = count;
++    })
++    .catch(() => {
++      if (itemId === props.itemId) playlistTotal.value = undefined;
++    });
++};
++
+ const loadPlaylistTracksPage = async function (params: LoadDataParams) {
++  // counted alongside the first page, not before it, so the list does not wait for the count
++  if (
++    params.offset === 0 &&
++    (params.refresh || countedItemId !== props.itemId)
++  ) {
++    // another playlist's count must not drive the strip while this one is counted
++    if (countedItemId !== props.itemId) playlistTotal.value = undefined;
++    refreshPlaylistTotal(params.refresh);
++  }
+   return await api.getPlaylistTracksPage(
+     props.itemId,
+     props.provider,
+diff --git a/tests/components/PageJumpBar.test.ts b/tests/components/PageJumpBar.test.ts
+new file mode 100644
+index 0000000..e9f2c6c
+--- /dev/null
++++ b/tests/components/PageJumpBar.test.ts
+@@ -0,0 +1,46 @@
++import { mount } from "@vue/test-utils";
++import { beforeEach, describe, expect, it } from "vitest";
++import PageJumpBar from "@/components/PageJumpBar.vue";
++import { i18n } from "@/plugins/i18n";
++
++beforeEach(() => {
++  i18n.global.locale.value = "en";
++});
++
++describe("PageJumpBar", () => {
++  it("labels each chip with the position of its first item", () => {
++    const wrapper = mount(PageJumpBar, {
++      props: { offsets: [0, 50, 100] },
++      global: { plugins: [i18n] },
++    });
++
++    expect(wrapper.findAll("button").map((b) => b.text())).toEqual([
++      "1",
++      "51",
++      "101",
++    ]);
++  });
++
++  it("emits the offset of the chip that was tapped", async () => {
++    const wrapper = mount(PageJumpBar, {
++      props: { offsets: [0, 50, 100] },
++      global: { plugins: [i18n] },
++    });
++
++    await wrapper.findAll("button")[2].trigger("click");
++
++    expect(wrapper.emitted("jump")).toEqual([[100]]);
++  });
++
++  it("marks the active chip and greys the strip out while busy", () => {
++    const wrapper = mount(PageJumpBar, {
++      props: { offsets: [0, 50], active: 50, disabled: true },
++      global: { plugins: [i18n] },
++    });
++
++    const chips = wrapper.findAll("button");
++    expect(chips[1].classes()).toContain("page-jump-bar__chip--active");
++    expect(chips[1].attributes("aria-current")).toBe("true");
++    expect(chips[0].attributes("disabled")).toBeDefined();
++  });
++});
+diff --git a/tests/helpers/page_jump.test.ts b/tests/helpers/page_jump.test.ts
+new file mode 100644
+index 0000000..282e7f2
+--- /dev/null
++++ b/tests/helpers/page_jump.test.ts
+@@ -0,0 +1,49 @@
++import { describe, expect, it } from "vitest";
++
++import { pageJumpAvailable, pageJumpOffsets } from "@/helpers/page_jump";
++
++describe("pageJumpOffsets", () => {
++  it("starts a chip at every full page of the listing", () => {
++    expect(pageJumpOffsets(120, 50)).toEqual([0, 50, 100]);
++  });
++
++  it("gives no chips for an empty listing", () => {
++    expect(pageJumpOffsets(0, 50)).toEqual([]);
++  });
++
++  it("adds no chip past the last item when the total is a whole number of pages", () => {
++    expect(pageJumpOffsets(100, 50)).toEqual([0, 50]);
++  });
++});
++
++describe("pageJumpAvailable", () => {
++  const base = {
++    sortBy: "position",
++    search: undefined,
++    total: 51,
++    pageSize: 50,
++  };
++
++  it("is on for a playlist longer than one page in position order", () => {
++    expect(pageJumpAvailable(base)).toBe(true);
++    expect(pageJumpAvailable({ ...base, sortBy: "position_desc" })).toBe(true);
++  });
++
++  it("is off for a playlist that fits one page", () => {
++    expect(pageJumpAvailable({ ...base, total: 50 })).toBe(false);
++    expect(pageJumpAvailable({ ...base, total: 0 })).toBe(false);
++  });
++
++  it("is off for any other sort, which keeps the A-Z strip or nothing", () => {
++    expect(pageJumpAvailable({ ...base, sortBy: "name" })).toBe(false);
++    expect(pageJumpAvailable({ ...base, sortBy: "duration" })).toBe(false);
++  });
++
++  it("is off while a search narrows the list, since the total no longer applies", () => {
++    expect(pageJumpAvailable({ ...base, search: "jam" })).toBe(false);
++  });
++
++  it("is off while the total is not known yet", () => {
++    expect(pageJumpAvailable({ ...base, total: undefined })).toBe(false);
++  });
++});
+-- 
+2.43.0
+

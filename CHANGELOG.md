@@ -21,8 +21,19 @@ Waiting for the next publish build (patches are committed, not pushed):
 - Opening a big playlist no longer loads every track at once. The contents load 50 at a
   time from a new server command, `music/playlists/playlist_tracks_page`, in the chosen
   order and with the search text. Untested in a browser: the scroll loading needs a look
-  on the running add-on. Not covered: "select all" on a paged playlist skips its
-  confirmation prompt (the total is unknown), and album-disc grouping is off in that view.
+  on the running add-on. Album-disc grouping is off in that view.
+
+- Numbered jump strip on a playlist sorted by position: 1  51  101 and so on, one chip per
+  page of 50. A tap loads from that offset and scrolls to it, and scrolling on continues
+  from there. Shown only for playlists longer than 50 items, and hidden while a search is
+  active. The default sort stays position. Needs a new server command,
+  `music/playlists/playlist_tracks_count`, which reads the whole playlist once to count it.
+  Not tried in a browser. Known gaps: the strip shows every chip in one scrolling row, not
+  a shortened "+" form; the lit chip is the last one tapped, not the one in view; and
+  "select all" after a jump selects only from that page onwards.
+
+- "Select all" on a paged playlist now asks for confirmation above 250 items, because the
+  playlist's total is known. Not tried in a browser.
 
 Repository and tooling only; none of this changes the add-on image.
 

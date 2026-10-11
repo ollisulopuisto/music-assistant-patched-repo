@@ -1,0 +1,82 @@
+From f98749670f633f1d19f34155b89f3406c6ca83a3 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Sun, 11 Oct 2026 10:03:35 +0000
+Subject: [PATCH] Count a playlist's items for a numbered jump strip
+
+---
+ .../controllers/music/media/playlists.py      | 30 +++++++++++++++++++
+ .../music/test_playlist_tracks_page.py        | 13 ++++++++
+ 2 files changed, 43 insertions(+)
+
+diff --git a/music_assistant/controllers/music/media/playlists.py b/music_assistant/controllers/music/media/playlists.py
+index 8fd8586..db7c2d6 100644
+--- a/music_assistant/controllers/music/media/playlists.py
++++ b/music_assistant/controllers/music/media/playlists.py
+@@ -91,6 +91,11 @@ class PlaylistController(MediaControllerBase[Playlist]):
+             self.tracks_page,
+             required_scope=Scope.LIBRARY_READ,
+         )
++        self.mass.register_api_command(
++            "music/playlists/playlist_tracks_count",
++            self.tracks_count,
++            required_scope=Scope.LIBRARY_READ,
++        )
+         self.mass.register_api_command(
+             "music/playlists/add_playlist_tracks",
+             self.add_playlist_tracks,
+@@ -212,6 +217,31 @@ class PlaylistController(MediaControllerBase[Playlist]):
+             items, order_by, search, offset, limit, starts_from, starts_before
+         )
+ 
++    async def tracks_count(
++        self,
++        item_id: str,
++        provider_instance_id_or_domain: str,
++        force_refresh: bool = False,
++    ) -> int:
++        """
++        Return the number of items in a provider playlist.
++
++        Reads the whole playlist, as a listing sorted by name does. The count is what a
++        numbered jump needs to know how far down the list goes.
++
++        :param item_id: Provider playlist ID.
++        :param provider_instance_id_or_domain: Provider instance ID or domain.
++        :param force_refresh: Bypass cached playlist contents.
++        """
++        count = 0
++        stream = self.tracks(item_id, provider_instance_id_or_domain, force_refresh=force_refresh)
++        try:
++            async for _ in stream:
++                count += 1
++        finally:
++            await stream.aclose()
++        return count
++
+     async def create_playlist(
+         self,
+         name: str,
+diff --git a/tests/controllers/music/test_playlist_tracks_page.py b/tests/controllers/music/test_playlist_tracks_page.py
+index efe83c6..99c9fc8 100644
+--- a/tests/controllers/music/test_playlist_tracks_page.py
++++ b/tests/controllers/music/test_playlist_tracks_page.py
+@@ -97,3 +97,16 @@ async def test_page_above_a_jump_is_reversed_and_nearest_first() -> None:
+     src = _Source(30)
+     page = await _page(src, limit=3, offset=0, order_by="name_desc", starts_before="t020")
+     assert [t.name for t in page] == ["t019", "t018", "t017"]
++
++
++async def test_count_reads_every_item() -> None:
++    """The count reads the whole playlist, whatever the page size, and closes the stream."""
++    src = _Source(1234)
++    assert await PlaylistController.tracks_count(src, "pl", "spotify") == 1234  # type: ignore[arg-type]
++    assert src.read == 1234
++    assert src.closed
++
++
++async def test_count_of_an_empty_playlist_is_zero() -> None:
++    """An empty playlist counts as zero."""
++    assert await PlaylistController.tracks_count(_Source(0), "pl", "spotify") == 0  # type: ignore[arg-type]
+-- 
+2.43.0
+
