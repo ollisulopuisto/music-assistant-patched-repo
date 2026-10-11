@@ -23,6 +23,11 @@ Waiting for the next publish build (patches are committed, not pushed):
   order and with the search text. Untested in a browser: the scroll loading needs a look
   on the running add-on. Album-disc grouping is off in that view.
 
+- Spotify Soloist: a capture that goes quiet is logged at debug level after 5 s (engine
+  state, sink state, cushion fill), and again when the silence ends. Diagnostic only; playback
+  is unchanged. Adds a test that Soloist's own 30 s stall guard fires before the stream's
+  20 s watchdog. That test fails until the timeout is decided. Not tried on the add-on.
+
 - Numbered jump strip on a playlist sorted by position: 1  51  101 and so on, one chip per
   page of 50. A tap loads from that offset and scrolls to it, and scrolling on continues
   from there. Shown only for playlists longer than 50 items, and hidden while a search is

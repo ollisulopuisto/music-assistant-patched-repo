@@ -1,0 +1,130 @@
+From a06d7903c862f54cc51794463c00790e9bf99bf1 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Sun, 11 Oct 2026 12:44:31 +0000
+Subject: [PATCH] Log a long silence from the Spotify Soloist capture
+
+A Spotify track that stopped delivering audio ended with the generic 'Source stalled' error,
+and nothing recorded what the capture was doing. Log the state once the capture has been
+quiet for 5 s, and log when the silence ends. Adds a test that Soloist's own 30 s stall guard
+fires inside the stream watchdog's 20 s window; it is expected to fail until that is decided.
+---
+ .../providers/spotify/backends/soloist.py     | 26 +++++++++++++++++++
+ .../providers/spotify/test_soloist_backend.py | 23 ++++++++++++++++
+ 2 files changed, 49 insertions(+)
+
+diff --git a/music_assistant/providers/spotify/backends/soloist.py b/music_assistant/providers/spotify/backends/soloist.py
+index a7e846b..019bb12 100644
+--- a/music_assistant/providers/spotify/backends/soloist.py
++++ b/music_assistant/providers/spotify/backends/soloist.py
+@@ -112,6 +112,8 @@ _READ_CHUNK_SIZE: Final[int] = 32768
+ _READ_SLICE_S: Final[float] = 1.0
+ # a suspended sink delivers nothing while soloist rebuffers; give recovery some room
+ _STALL_TIMEOUT_S: Final[float] = 30.0
++# how long the capture may go without PCM before the state is logged for diagnosis
++_SILENCE_LOG_S: Final[float] = 5.0
+ # waiting for the daemon's WS endpoint, events and the requested item to appear
+ _STARTUP_TIMEOUT_S: Final[float] = 30.0
+ # How long a jump on a live session is given to land. Generous against the
+@@ -1018,6 +1020,25 @@ class _SingleTrackRun:
+         await proc.wait()
+         self._engine_exited = True
+ 
++    def _log_silence(self, silent_for: float) -> None:
++        """Record the state the capture was in when it had gone quiet for a while."""
++        self.logger.debug(
++            "No PCM from the capture for %.0fs: engine playing=%s, sink running=%s, "
++            "cushion %d/%d, engine exited=%s",
++            silent_for,
++            self._engine_playing,
++            self._sink_running,
++            self._chunks.qsize(),
++            self._chunks.maxsize,
++            self._engine_exited,
++        )
++
++    def _resume_after_silence(self, silent_for: float) -> float:
++        """Log a long silence once it ends, and return the silence counter reset."""
++        if silent_for >= _SILENCE_LOG_S:
++            self.logger.debug("PCM resumed after %.0fs of silence", silent_for)
++        return 0.0
++
+     async def _read_capture(self) -> None:
+         """
+         Read the capture FIFO for the run's whole life and cushion it for the consumer.
+@@ -1037,6 +1058,7 @@ class _SingleTrackRun:
+         pace_anchor: float | None = None
+         paced_bytes = 0
+         stalled_for = 0.0
++        silent_for = 0.0
+         while not self._stopped:
+             if self._item_over:
+                 # the engine moved on: everything after this point is the next
+@@ -1046,6 +1068,9 @@ class _SingleTrackRun:
+             try:
+                 chunk = await asyncio.wait_for(reader.read(_READ_CHUNK_SIZE), _READ_SLICE_S)
+             except TimeoutError:
++                silent_for += _READ_SLICE_S
++                if silent_for == _SILENCE_LOG_S:
++                    self._log_silence(silent_for)
+                 if self._engine_exited:
+                     # the engine exited and its tail has drained: the item is over
+                     self._finish_delivery()
+@@ -1064,6 +1089,7 @@ class _SingleTrackRun:
+                 pace_anchor = None
+                 continue
+             stalled_for = 0.0
++            silent_for = self._resume_after_silence(silent_for)
+             if not chunk:
+                 # writer end closed: the capture sink is gone (pulse restart)
+                 self._fail("Spotify playback was interrupted")
+diff --git a/tests/providers/spotify/test_soloist_backend.py b/tests/providers/spotify/test_soloist_backend.py
+index ecca808..4b95587 100644
+--- a/tests/providers/spotify/test_soloist_backend.py
++++ b/tests/providers/spotify/test_soloist_backend.py
+@@ -23,6 +23,7 @@ from music_assistant_models.errors import AudioError, LoginFailed
+ from music_assistant_models.media_items import AudioFormat
+ from music_assistant_models.streamdetails import StreamDetails
+ 
++from music_assistant.constants import STREAM_STALL_TIMEOUT
+ from music_assistant.models.music_provider import ProviderStreamLimitError
+ from music_assistant.providers.spotify.backends import StreamSupersededError
+ from music_assistant.providers.spotify.backends import soloist as soloist_backend
+@@ -30,6 +31,7 @@ from music_assistant.providers.spotify.backends.soloist import (
+     _BYTES_PER_SECOND,
+     _FRAME_BYTES,
+     _MAX_LEAD_TRIM_S,
++    _STALL_TIMEOUT_S,
+     _TAIL_PAD_GRACE_S,
+     _TAIL_PAD_ZONE_S,
+     SoloistBackend,
+@@ -395,6 +397,27 @@ def test_scrub_leaves_a_short_items_silence_alone(tmp_path: Path) -> None:
+     assert run._scrub(chunk) == chunk
+ 
+ 
++def test_the_capture_stall_gives_up_before_the_stream_watchdog() -> None:
++    """
++    Spotify's own stall guard must fire inside the stream watchdog's window.
++
++    When the capture goes quiet while the engine is still playing, the consumer's
++    watchdog ends the stream first with the generic "Source stalled" error, and the
++    run's own reason ("stopped sending audio") is never reported.
++    """
++    assert _STALL_TIMEOUT_S < STREAM_STALL_TIMEOUT
++
++
++def test_a_long_capture_silence_is_logged_once_it_ends(tmp_path: Path) -> None:
++    """A silence long enough to matter is logged when it ends; a short blip is not."""
++    run = _make_run(tmp_path)
++    logger = cast("MagicMock", run.logger)
++    assert run._resume_after_silence(2.0) == 0.0
++    logger.debug.assert_not_called()
++    assert run._resume_after_silence(12.0) == 0.0
++    logger.debug.assert_called_once_with("PCM resumed after %.0fs of silence", 12.0)
++
++
+ async def test_a_full_cushion_pauses_the_engine(tmp_path: Path) -> None:
+     """When the consumer stops taking audio, the sink is suspended, not overflowed."""
+     run = _make_run(tmp_path)
+-- 
+2.43.0
+
