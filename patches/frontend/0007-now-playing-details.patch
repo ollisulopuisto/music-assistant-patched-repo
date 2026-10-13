@@ -1,0 +1,416 @@
+From 13931b730fa785875bb694e8fe6900b06f1c6e60 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Tue, 13 Oct 2026 13:45:16 +0000
+Subject: [PATCH] Now-playing dashboard: artist portrait, bigger artwork,
+ stream line and lyrics
+
+The dashboard showed a small square of album art. It now shows the artist's portrait
+(album art when there is none), sized to cover about half of a 16:9 screen, with the
+text and timeline beside it in landscape. Under the title it shows the stream format
+(codec, sample rate, bit depth for lossless, bitrate) from the server's custom data,
+and it shows the track's lyrics, fetched once per track as the party dashboard does.
+
+Helpers and their tests come first; the dashboard test stubs the lyrics clock, which
+reads the queue API this test does not provide.
+---
+ src/helpers/now_playing_details.ts          |  58 ++++++++
+ src/plugins/api/interfaces.ts               |   2 +
+ src/views/DashboardNowPlayingView.vue       | 148 +++++++++++++++++++-
+ tests/helpers/now_playing_details.test.ts   |  70 +++++++++
+ tests/views/DashboardNowPlayingView.test.ts |   6 +
+ 5 files changed, 277 insertions(+), 7 deletions(-)
+ create mode 100644 src/helpers/now_playing_details.ts
+ create mode 100644 tests/helpers/now_playing_details.test.ts
+
+diff --git a/src/helpers/now_playing_details.ts b/src/helpers/now_playing_details.ts
+new file mode 100644
+index 0000000..b77aaf0
+--- /dev/null
++++ b/src/helpers/now_playing_details.ts
+@@ -0,0 +1,58 @@
++/** Helpers for the details the now-playing dashboard shows beyond the title and cover. */
++
++/** The stream format the server reports in a now-playing item's custom data. */
++export interface StreamFormat {
++  content_type: string;
++  sample_rate: number;
++  bit_depth: number;
++  bit_rate: number | null;
++}
++
++// codecs that keep every sample, so the bit depth says something about the audio
++const LOSSLESS_CODECS = ["flac", "alac", "wav", "aiff", "dsf", "dff"];
++
++/**
++ * Return a one-line description of the stream, such as "FLAC · 96 kHz · 24-bit · 2300 kbps".
++ *
++ * The bit depth is only shown for lossless codecs, where it means something; lossy codecs
++ * show their bitrate instead. Anything not known is left out, and nothing known gives "".
++ *
++ * :param format: The stream format, or null/undefined when the server has not reported one.
++ */
++export function formatStreamLine(
++  format: StreamFormat | null | undefined,
++): string {
++  if (!format) return "";
++  const codec = format.content_type.toLowerCase();
++  const lossless = codec.startsWith("pcm") || LOSSLESS_CODECS.includes(codec);
++  const parts: string[] = [];
++  if (codec && codec !== "unknown") {
++    parts.push(codec.startsWith("pcm") ? "PCM" : codec.toUpperCase());
++  }
++  if (format.sample_rate > 0) {
++    parts.push(`${Number((format.sample_rate / 1000).toFixed(1))} kHz`);
++  }
++  if (lossless && format.bit_depth > 0) {
++    parts.push(`${format.bit_depth}-bit`);
++  }
++  if (format.bit_rate) {
++    parts.push(`${format.bit_rate} kbps`);
++  }
++  return parts.join(" · ");
++}
++
++/**
++ * Return the image the dashboard should show big: the artist's portrait when the server has
++ * one, otherwise the album art.
++ *
++ * :param customData: The now-playing item's custom data from the server, if any.
++ * :param albumImageUrl: The album art URL the server reports for the item.
++ */
++export function nowPlayingArtwork(
++  customData: Record<string, unknown> | null | undefined,
++  albumImageUrl: string | null,
++): string | null {
++  const artist = customData?.artist_image_url;
++  if (typeof artist === "string" && artist) return artist;
++  return albumImageUrl || null;
++}
+diff --git a/src/plugins/api/interfaces.ts b/src/plugins/api/interfaces.ts
+index 2ea3174..869a672 100644
+--- a/src/plugins/api/interfaces.ts
++++ b/src/plugins/api/interfaces.ts
+@@ -1375,6 +1375,8 @@ export interface PlayerMedia {
+   elapsed_time: number | null;
+   elapsed_time_last_updated: number | null;
+   queue_item_id: string | null; // only set for requests from the queue controller
++  // server-side extras, such as the stream format and the artist image URL
++  custom_data?: Record<string, unknown> | null;
+ }
+ 
+ export interface PlayerSource {
+diff --git a/src/views/DashboardNowPlayingView.vue b/src/views/DashboardNowPlayingView.vue
+index c679a55..ee44fe9 100644
+--- a/src/views/DashboardNowPlayingView.vue
++++ b/src/views/DashboardNowPlayingView.vue
+@@ -41,9 +41,22 @@
+           <MarqueeText :sync="marqueeSync" class="now-playing-subtitle">
+             {{ store.activePlayer.current_media?.artist || " " }}
+           </MarqueeText>
++          <div v-if="streamLine" class="now-playing-format">
++            {{ streamLine }}
++          </div>
+         </template>
+       </div>
+ 
++      <div v-if="hasLyrics" class="now-playing-lyrics">
++        <LyricsViewer
++          :media-item="store.curQueueItem?.media_item"
++          :position="lyricsElapsedTime"
++          :lyrics="currentLyrics.plain"
++          :lrc-lyrics="currentLyrics.synced"
++          :text-color="'#fff'"
++        />
++      </div>
++
+       <div class="now-playing-timeline">
+         <PlayerTimeline
+           :show-labels="true"
+@@ -56,23 +69,32 @@
+ </template>
+ 
+ <script setup lang="ts">
++import LyricsViewer from "@/components/LyricsViewer.vue";
+ import MarqueeText from "@/components/MarqueeText.vue";
+ import VisualizerCanvas from "@/components/VisualizerCanvas.vue";
+ import PlayerIcon from "@/components/PlayerIcon.vue";
+ import { useActiveTrackWaveform } from "@/composables/useActiveTrackWaveform";
++import { useLyricsElapsedTime } from "@/composables/lyrics/useLyricsElapsedTime";
+ import { useVisualizer } from "@/composables/visualizer/useVisualizer";
+ import { MarqueeTextSync } from "@/helpers/marquee_text_sync";
++import {
++  type StreamFormat,
++  formatStreamLine,
++  nowPlayingArtwork,
++} from "@/helpers/now_playing_details";
+ import {
+   type ImageColorPalette,
+   getMediaImageUrl,
+   paletteFromServer,
+ } from "@/helpers/utils";
+ import PlayerTimeline from "@/layouts/default/PlayerOSD/PlayerTimeline.vue";
++import api from "@/plugins/api";
++import { MediaType, type Track } from "@/plugins/api/interfaces";
+ import { $t } from "@/plugins/i18n";
+ import { store } from "@/plugins/store";
+ import { useColorMode } from "@vueuse/core";
+ import Color from "color";
+-import { computed, onMounted } from "vue";
++import { computed, onMounted, ref, watch } from "vue";
+ import { useRoute } from "vue-router";
+ 
+ const route = useRoute();
+@@ -91,8 +113,57 @@ const marqueeSync = new MarqueeTextSync();
+ // Waveform is always on here: the guest session has no show_waveform preference, so it defaults on.
+ const { waveformBins: waveformData } = useActiveTrackWaveform();
+ 
+-const artworkUrl = computed(
+-  () => getMediaImageUrl(store.activePlayer?.current_media?.image_url) || null,
++// the artist's portrait is shown big when the server has one; the album art is the fallback
++const artworkUrl = computed(() =>
++  getMediaImageUrl(
++    nowPlayingArtwork(
++      store.activePlayer?.current_media?.custom_data,
++      store.activePlayer?.current_media?.image_url ?? null,
++    ),
++  ),
++);
++
++// Lyrics for the track on screen, fetched once per track like the party dashboard does.
++const currentLyrics = ref<{ plain: string | null; synced: string | null }>({
++  plain: null,
++  synced: null,
++});
++const hasLyrics = computed(() =>
++  Boolean(currentLyrics.value.plain || currentLyrics.value.synced),
++);
++const lyricsEnabled = ref(true);
++const { elapsedTime: lyricsElapsedTime } = useLyricsElapsedTime(lyricsEnabled);
++
++const fetchLyrics = async () => {
++  currentLyrics.value = { plain: null, synced: null };
++  const mediaItem = store.curQueueItem?.media_item;
++  if (!mediaItem || mediaItem.media_type !== MediaType.TRACK) return;
++
++  const track = mediaItem as Track;
++  const existingPlain = track.metadata?.lyrics?.trim() || null;
++  const existingSynced = track.metadata?.lrc_lyrics?.trim() || null;
++  if (existingPlain || existingSynced) {
++    currentLyrics.value = { plain: existingPlain, synced: existingSynced };
++    return;
++  }
++  try {
++    const [lyrics, lrcLyrics] = await api.getTrackLyrics(track);
++    currentLyrics.value = { plain: lyrics, synced: lrcLyrics };
++  } catch (error) {
++    console.error("Failed to fetch track lyrics:", error);
++  }
++};
++
++watch(() => store.curQueueItem?.media_item?.uri, fetchLyrics, {
++  immediate: true,
++});
++
++const streamLine = computed(() =>
++  formatStreamLine(
++    store.activePlayer?.current_media?.custom_data?.audio_format as
++      | StreamFormat
++      | undefined,
++  ),
+ );
+ 
+ const {
+@@ -172,8 +243,8 @@ const backgroundGradient = computed(() => {
+ .now-playing-artwork-image {
+   /* flex-basis auto with no shrink: the square must never be squashed to fit */
+   flex: 0 0 auto;
+-  width: min(52vh, 85vw);
+-  height: min(52vh, 85vw);
++  width: min(70vh, 90vw);
++  height: min(70vh, 90vw);
+   aspect-ratio: 1;
+   object-fit: cover;
+   border-radius: 12px;
+@@ -182,8 +253,8 @@ const backgroundGradient = computed(() => {
+ 
+ .now-playing-artwork-fallback {
+   flex: 0 0 auto;
+-  width: min(52vh, 85vw);
+-  height: min(52vh, 85vw);
++  width: min(70vh, 90vw);
++  height: min(70vh, 90vw);
+   aspect-ratio: 1;
+   border-radius: 12px;
+   display: flex;
+@@ -216,12 +287,75 @@ const backgroundGradient = computed(() => {
+   margin-top: 0.25rem;
+ }
+ 
++.now-playing-format {
++  font-size: clamp(0.8rem, 1.4vw, 1.1rem);
++  opacity: 0.65;
++  margin-top: 0.35rem;
++  font-variant-numeric: tabular-nums;
++}
++
++.now-playing-lyrics {
++  flex: 0 1 auto;
++  width: 100%;
++  max-width: 900px;
++  min-height: 0;
++  overflow: hidden;
++}
++
+ .now-playing-timeline {
+   flex: 0 0 auto;
+   width: 100%;
+   max-width: 900px;
+ }
+ 
++/* Landscape (TV, Hub): the artwork takes the left half of the screen, text and timeline the right. */
++@media (orientation: landscape) {
++  .now-playing-view {
++    display: grid;
++    grid-template-columns: min(96vh, 55vw) minmax(0, 1fr);
++    grid-template-rows: auto minmax(0, 1fr) auto;
++    column-gap: 4vw;
++    align-items: center;
++    padding: 2vh 3vw;
++  }
++
++  .now-playing-artwork {
++    grid-column: 1;
++    grid-row: 1 / span 3;
++    margin-top: 0;
++    width: auto;
++  }
++
++  .now-playing-artwork-image,
++  .now-playing-artwork-fallback {
++    width: min(96vh, 55vw);
++    height: min(96vh, 55vw);
++  }
++
++  .now-playing-info {
++    grid-column: 2;
++    grid-row: 1;
++    max-width: none;
++    margin-block: 0;
++    text-align: left;
++    align-self: end;
++  }
++
++  .now-playing-lyrics {
++    grid-column: 2;
++    grid-row: 2;
++    max-width: none;
++    align-self: stretch;
++  }
++
++  .now-playing-timeline {
++    grid-column: 2;
++    grid-row: 3;
++    max-width: none;
++    align-self: start;
++  }
++}
++
+ /* The timeline's elapsed/total labels come from a shared Vuetify caption class;
+    scale them here only, so the rest of the app keeps its 12px captions. */
+ .now-playing-timeline :deep(.text-caption) {
+diff --git a/tests/helpers/now_playing_details.test.ts b/tests/helpers/now_playing_details.test.ts
+new file mode 100644
+index 0000000..3b08ea5
+--- /dev/null
++++ b/tests/helpers/now_playing_details.test.ts
+@@ -0,0 +1,70 @@
++import { describe, expect, it } from "vitest";
++
++import {
++  formatStreamLine,
++  nowPlayingArtwork,
++} from "@/helpers/now_playing_details";
++
++describe("formatStreamLine", () => {
++  it("shows codec, sample rate, bit depth and bitrate for lossless audio", () => {
++    expect(
++      formatStreamLine({
++        content_type: "flac",
++        sample_rate: 96000,
++        bit_depth: 24,
++        bit_rate: 2300,
++      }),
++    ).toBe("FLAC · 96 kHz · 24-bit · 2300 kbps");
++  });
++
++  it("leaves the bit depth out for lossy audio", () => {
++    expect(
++      formatStreamLine({
++        content_type: "mp3",
++        sample_rate: 44100,
++        bit_depth: 16,
++        bit_rate: 320,
++      }),
++    ).toBe("MP3 · 44.1 kHz · 320 kbps");
++  });
++
++  it("omits the bitrate when it is not known", () => {
++    expect(
++      formatStreamLine({
++        content_type: "pcm_s16le",
++        sample_rate: 48000,
++        bit_depth: 16,
++        bit_rate: null,
++      }),
++    ).toBe("PCM · 48 kHz · 16-bit");
++  });
++
++  it("is empty when no format is known", () => {
++    expect(formatStreamLine(undefined)).toBe("");
++    expect(formatStreamLine(null)).toBe("");
++  });
++});
++
++describe("nowPlayingArtwork", () => {
++  it("prefers the artist image over the album art", () => {
++    expect(
++      nowPlayingArtwork(
++        { artist_image_url: "https://img.test/artist.jpg" },
++        "https://img.test/album.jpg",
++      ),
++    ).toBe("https://img.test/artist.jpg");
++  });
++
++  it("falls back to the album art when there is no artist image", () => {
++    expect(nowPlayingArtwork({}, "https://img.test/album.jpg")).toBe(
++      "https://img.test/album.jpg",
++    );
++    expect(nowPlayingArtwork(undefined, "https://img.test/album.jpg")).toBe(
++      "https://img.test/album.jpg",
++    );
++  });
++
++  it("is null when neither is known", () => {
++    expect(nowPlayingArtwork({}, null)).toBeNull();
++  });
++});
+diff --git a/tests/views/DashboardNowPlayingView.test.ts b/tests/views/DashboardNowPlayingView.test.ts
+index 70eac3a..86bd294 100644
+--- a/tests/views/DashboardNowPlayingView.test.ts
++++ b/tests/views/DashboardNowPlayingView.test.ts
+@@ -46,6 +46,12 @@ vi.mock("@/plugins/i18n", () => ({
+   $t: (key: string) => key,
+ }));
+ 
++// The lyrics clock reads the queue API, which this test does not stub; the lyrics path has its own tests.
++vi.mock("@/composables/lyrics/useLyricsElapsedTime", async () => {
++  const { ref } = await import("vue");
++  return { useLyricsElapsedTime: () => ({ elapsedTime: ref(0) }) };
++});
++
+ vi.mock("@vueuse/core", () => ({
+   useColorMode: () => ({ value: "light" }),
+ }));
+-- 
+2.43.0
+

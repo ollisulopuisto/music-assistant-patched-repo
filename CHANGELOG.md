@@ -28,6 +28,13 @@ Waiting for the next publish build (patches are committed, not pushed):
   is unchanged. Adds a test that Soloist's own 30 s stall guard fires before the stream's
   20 s watchdog. That test fails until the timeout is decided. Not tried on the add-on.
 
+- Now-playing dashboard: the artwork is the artist's portrait (album art when there is none),
+  sized to cover about half a 16:9 screen, with the text and timeline beside it in landscape.
+  Under the title it shows the stream format (codec, sample rate, bit depth for lossless,
+  bitrate), and it shows the track's lyrics, fetched once per track. Needs server patch 0011,
+  which puts the format and artist image into the media's custom data. Not tried on a TV yet;
+  the lyrics clock is untested in a browser.
+
 - Numbered jump strip on a playlist sorted by position: 1  51  101 and so on, one chip per
   page of 50. A tap loads from that offset and scrolls to it, and scrolling on continues
   from there. Shown only for playlists longer than 50 items, and hidden while a search is
