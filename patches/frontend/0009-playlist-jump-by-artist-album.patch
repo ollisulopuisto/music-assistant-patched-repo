@@ -1,0 +1,209 @@
+From 38b67e23b5cccff70e730a16c1567557986b69b3 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Tue, 13 Oct 2026 18:35:39 +0000
+Subject: [PATCH] A-Z strip on a playlist sorted by artist or album
+
+Sorted by artist, a jump to K now means artists starting with K, and sorted by album,
+albums starting with K. The playlist opts the artist and album orders into the strip
+(PLAYLIST_LETTER_SORT_KEYS); the library listings keep to the name orders, since they filter
+by the track's own name column. Each row is filed by its first artist or its album so the
+strip highlights the letter being scrolled through. Tests first.
+---
+ src/components/ItemsListing.vue     |  6 ++-
+ src/helpers/alphabet_jump.ts        | 47 +++++++++++++++++++--
+ src/views/PlaylistDetails.vue       |  2 +
+ tests/helpers/alphabet_jump.test.ts | 64 +++++++++++++++++++++++++++++
+ 4 files changed, 115 insertions(+), 4 deletions(-)
+ create mode 100644 tests/helpers/alphabet_jump.test.ts
+
+diff --git a/src/components/ItemsListing.vue b/src/components/ItemsListing.vue
+index cbf5bc4..d431bc1 100644
+--- a/src/components/ItemsListing.vue
++++ b/src/components/ItemsListing.vue
+@@ -517,6 +517,8 @@ export interface Props {
+   showLibraryOnlyFilter?: boolean;
+   showGenreFilter?: boolean;
+   showAlphabetJump?: boolean;
++  // the sort keys the A-Z strip is offered under; the name orders when not set
++  alphabetSortKeys?: string[];
+   // numbered strip for a long listing in its own order; needs total to be passed
+   showPageJump?: boolean;
+   pinListingHeader?: boolean;
+@@ -1027,7 +1029,9 @@ const changeSort = function (sort_key?: string) {
+ // or play count, "from K onwards" would scatter matching items through the listing rather
+ // than starting it somewhere. The strip stays out of the way for those sorts.
+ const alphabetJumpAvailable = computed(
+-  () => props.showAlphabetJump && NAME_SORT_KEYS.includes(params.value.sortBy),
++  () =>
++    props.showAlphabetJump &&
++    (props.alphabetSortKeys ?? NAME_SORT_KEYS).includes(params.value.sortBy),
+ );
+ 
+ // The numbered strip for a long playlist in its own order: one chip per page, so the far end
+diff --git a/src/helpers/alphabet_jump.ts b/src/helpers/alphabet_jump.ts
+index 77da13b..8634395 100644
+--- a/src/helpers/alphabet_jump.ts
++++ b/src/helpers/alphabet_jump.ts
+@@ -11,6 +11,21 @@ export const NAME_SORT_KEYS = [
+   "sort_name_desc",
+ ];
+ 
++/**
++ * The sort keys a playlist's letter strip works under: the name orders, plus artist and album.
++ *
++ * A playlist's contents are sorted and cut on the server, which files each item by the name
++ * the order follows, so a jump to K in artist order means artists starting with K. The
++ * library listings filter by the track's own name column and keep to NAME_SORT_KEYS.
++ */
++export const PLAYLIST_LETTER_SORT_KEYS = [
++  ...NAME_SORT_KEYS,
++  "artist",
++  "artist_desc",
++  "album",
++  "album_desc",
++];
++
+ /**
+  * Return the same sort key in the opposite direction.
+  *
+@@ -50,6 +65,28 @@ export function earlierPageParams<
+   };
+ }
+ 
++/** Return the name an item is filed under, following the order the listing is sorted by. */
++function bucketSource(
++  item: {
++    name?: string;
++    sort_name?: string;
++    artists?: { name?: string; sort_name?: string }[] | null;
++    album?: { name?: string; sort_name?: string } | null;
++  },
++  sortBy: string,
++): string | undefined {
++  if (sortBy === "artist" || sortBy === "artist_desc") {
++    const artist = item.artists?.[0];
++    return artist ? (artist.sort_name ?? artist.name) : undefined;
++  }
++  if (sortBy === "album" || sortBy === "album_desc") {
++    return item.album ? (item.album.sort_name ?? item.album.name) : undefined;
++  }
++  return sortBy === "name" || sortBy === "name_desc"
++    ? item.name
++    : (item.sort_name ?? item.name);
++}
++
+ /**
+  * Return the strip bucket an item is filed under.
+  *
+@@ -62,11 +99,15 @@ export function earlierPageParams<
+  * :param sortBy: The sort key the listing is using, which decides which name is read.
+  */
+ export function bucketOf(
+-  item: { name?: string; sort_name?: string },
++  item: {
++    name?: string;
++    sort_name?: string;
++    artists?: { name?: string; sort_name?: string }[] | null;
++    album?: { name?: string; sort_name?: string } | null;
++  },
+   sortBy: string,
+ ): string {
+-  const usesPlainName = sortBy === "name" || sortBy === "name_desc";
+-  const source = usesPlainName ? item.name : (item.sort_name ?? item.name);
++  const source = bucketSource(item, sortBy);
+   const normalised = (source ?? "")
+     .normalize("NFD")
+     .replace(/\p{Diacritic}/gu, "")
+diff --git a/src/views/PlaylistDetails.vue b/src/views/PlaylistDetails.vue
+index 7bc8949..7fab487 100644
+--- a/src/views/PlaylistDetails.vue
++++ b/src/views/PlaylistDetails.vue
+@@ -52,6 +52,7 @@
+     :refresh-on-parent-update="true"
+     :load-paged-data="loadPlaylistTracksPage"
+     :show-alphabet-jump="true"
++    :alphabet-sort-keys="PLAYLIST_LETTER_SORT_KEYS"
+     :show-page-jump="true"
+     :total="playlistTotal"
+     :sort-keys="[
+@@ -74,6 +75,7 @@
+ </template>
+ 
+ <script setup lang="ts">
++import { PLAYLIST_LETTER_SORT_KEYS } from "@/helpers/alphabet_jump";
+ import DynamicItemSample from "@/components/DynamicItemSample.vue";
+ import InfoHeader from "@/components/InfoHeader.vue";
+ import ItemsListing, { LoadDataParams } from "@/components/ItemsListing.vue";
+diff --git a/tests/helpers/alphabet_jump.test.ts b/tests/helpers/alphabet_jump.test.ts
+new file mode 100644
+index 0000000..601e9e1
+--- /dev/null
++++ b/tests/helpers/alphabet_jump.test.ts
+@@ -0,0 +1,64 @@
++import { describe, expect, it } from "vitest";
++
++import {
++  NAME_SORT_KEYS,
++  PLAYLIST_LETTER_SORT_KEYS,
++  TOP_BUCKET,
++  bucketOf,
++} from "@/helpers/alphabet_jump";
++
++describe("bucketOf", () => {
++  it("files a track by its first artist when the listing is sorted by artist", () => {
++    const track = { name: "Song", artists: [{ name: "Kate Bush" }] };
++    expect(bucketOf(track, "artist")).toBe("K");
++    expect(bucketOf(track, "artist_desc")).toBe("K");
++  });
++
++  it("files a track by its album when the listing is sorted by album", () => {
++    const track = { name: "Song", album: { name: "Kilo" } };
++    expect(bucketOf(track, "album")).toBe("K");
++    expect(bucketOf(track, "album_desc")).toBe("K");
++  });
++
++  it("prefers the artist's sort name, as the server does", () => {
++    const track = {
++      name: "Song",
++      artists: [{ name: "The Beatles", sort_name: "Beatles, The" }],
++    };
++    expect(bucketOf(track, "artist")).toBe("B");
++  });
++
++  it("folds accents on the artist the way the server does", () => {
++    expect(bucketOf({ artists: [{ name: "Ärtig" }] }, "artist")).toBe("A");
++  });
++
++  it("puts a track with no artist or album at the top of the listing", () => {
++    expect(bucketOf({ name: "Radio", artists: [] }, "artist")).toBe(TOP_BUCKET);
++    expect(bucketOf({ name: "Radio", album: null }, "album")).toBe(TOP_BUCKET);
++  });
++
++  it("still files by the track name for the name orders", () => {
++    const track = {
++      name: "Zebra",
++      artists: [{ name: "Kate Bush" }],
++      album: { name: "Kilo" },
++    };
++    expect(bucketOf(track, "name")).toBe("Z");
++  });
++});
++
++describe("sort keys the letter strip offers", () => {
++  it("adds artist and album to a playlist's keys but not to the library's", () => {
++    expect(PLAYLIST_LETTER_SORT_KEYS).toEqual(
++      expect.arrayContaining(["artist", "artist_desc", "album", "album_desc"]),
++    );
++    expect(NAME_SORT_KEYS).not.toContain("artist");
++    expect(NAME_SORT_KEYS).not.toContain("album");
++  });
++
++  it("keeps the name keys in a playlist's", () => {
++    expect(PLAYLIST_LETTER_SORT_KEYS).toEqual(
++      expect.arrayContaining(NAME_SORT_KEYS),
++    );
++  });
++});
+-- 
+2.43.0
+
