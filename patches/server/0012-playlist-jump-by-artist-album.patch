@@ -1,0 +1,152 @@
+From 2d9dc9e2c002e9cd17e5e576c1d1f5ff502a9190 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Tue, 13 Oct 2026 18:30:39 +0000
+Subject: [PATCH] Jump by artist or album in a playlist sorted that way
+
+The A-Z strip on a playlist only worked in name order, where it compares the track title.
+Sorted by artist, a jump to K has to mean artists starting with K, and sorted by album,
+albums starting with K. The letter key now follows the order: the first artist's sort name
+for artist order, the album's for album order, folded the same way as the sort itself so
+the list and the jump agree. The descending forms artist_desc and album_desc exist so a
+listing can page upwards from a jump. Tests first.
+---
+ music_assistant/helpers/playlist_page.py | 36 ++++++++++-----
+ tests/helpers/test_playlist_page.py      | 58 ++++++++++++++++++++++++
+ 2 files changed, 82 insertions(+), 12 deletions(-)
+
+diff --git a/music_assistant/helpers/playlist_page.py b/music_assistant/helpers/playlist_page.py
+index 25b5114..9caf113 100644
+--- a/music_assistant/helpers/playlist_page.py
++++ b/music_assistant/helpers/playlist_page.py
+@@ -16,14 +16,26 @@ def _natural(value: str | None) -> list[tuple[int, int | str]]:
+     return [(0, int(p)) if i % 2 else (1, p) for i, p in enumerate(parts) if p != ""]
+ 
+ 
++def _letter_source(item: Any, order_by: str) -> str | None:
++    """Return the name an A-Z jump files the item under, following the order it is sorted by."""
++    if order_by in ("artist", "artist_desc"):
++        artists = getattr(item, "artists", None)
++        if not artists:
++            return None
++        return getattr(artists[0], "sort_name", None) or getattr(artists[0], "name", None)
++    if order_by in ("album", "album_desc"):
++        album = getattr(item, "album", None)
++        if album is None:
++            return None
++        return getattr(album, "sort_name", None) or getattr(album, "name", None)
++    if order_by in ("name", "name_desc"):
++        return getattr(item, "name", None)
++    return getattr(item, "sort_name", None) or getattr(item, "name", None)
++
++
+ def _letter_key(item: Any, order_by: str) -> str:
+     """Return the folded name an A-Z jump compares against, as the strip files it."""
+-    plain = order_by in ("name", "name_desc")
+-    source = (
+-        getattr(item, "name", None)
+-        if plain
+-        else getattr(item, "sort_name", None) or getattr(item, "name", None)
+-    )
++    source = _letter_source(item, order_by)
+     folded = unicodedata.normalize("NFD", source or "")
+     folded = "".join(ch for ch in folded if not unicodedata.combining(ch)).casefold()
+     return re.sub(r"[^a-z0-9]", "", folded)
+@@ -39,15 +51,13 @@ def _sort_name(item: Any) -> list[tuple[int, int | str]]:
+ 
+ 
+ def _first_artist(item: Any) -> list[tuple[int, int | str]]:
+-    artists = getattr(item, "artists", None)
+-    if not artists:
+-        return _natural(None)
+-    return _natural(getattr(artists[0], "sort_name", None) or artists[0].name)
++    """Order by the first artist's folded name, so the list agrees with an artist jump."""
++    return _natural(_letter_key(item, "artist"))
+ 
+ 
+ def _album_key(item: Any) -> tuple[Any, ...]:
+-    album = getattr(item, "album", None)
+-    name = _natural((getattr(album, "sort_name", None) or album.name) if album else None)
++    """Order by the folded album name, then disc and track, to agree with an album jump."""
++    name = _natural(_letter_key(item, "album"))
+     return (name, getattr(item, "disc_number", None) or 0, getattr(item, "track_number", None) or 0)
+ 
+ 
+@@ -64,7 +74,9 @@ _ORDERS: dict[str, tuple[Callable[[Any], Any], bool]] = {
+     "sort_name": (_sort_name, False),
+     "sort_name_desc": (_sort_name, True),
+     "artist": (_first_artist, False),
++    "artist_desc": (_first_artist, True),
+     "album": (_album_key, False),
++    "album_desc": (_album_key, True),
+     "duration": (_number("duration"), False),
+     "duration_desc": (_number("duration"), True),
+     "timestamp_added": (_number("timestamp_added"), False),
+diff --git a/tests/helpers/test_playlist_page.py b/tests/helpers/test_playlist_page.py
+index 1080797..b0fa3d0 100644
+--- a/tests/helpers/test_playlist_page.py
++++ b/tests/helpers/test_playlist_page.py
+@@ -194,3 +194,61 @@ def test_early_stop_is_off_when_a_letter_bound_is_given() -> None:
+     """A bound has to see every title, so the provider stream is read in full."""
+     assert wants_early_stop("position", None, starts_from="a") is False
+     assert wants_early_stop("position", None, starts_before="a") is False
++
++
++@pytest.fixture
++def credited() -> list[SimpleNamespace]:
++    """Tracks whose artist and album start with different letters."""
++    return [
++        _track("t1", artist="Zed", album="Blue", position=1),
++        _track("t2", artist="Abba", album="Gold", position=2),
++        _track("t3", artist="Kate Bush", album="Hounds", position=3),
++        _track("t4", artist="Kraftwerk", album="Autobahn", position=4),
++        _track("t5", artist="Michael Jackson", album="Kingdom", position=5),
++        _track("t6", artist="Ärtig", album="Kilo", position=6),
++    ]
++
++
++def test_a_jump_in_artist_order_goes_to_the_artist(credited: list[SimpleNamespace]) -> None:
++    """Sorted by artist, a jump to K opens at the first artist filed under K."""
++    page = page_playlist_items(credited, "artist", None, 0, 10, starts_from="k")
++    assert _names(page) == ["t3", "t4", "t5", "t1"]
++
++
++def test_a_jump_in_album_order_goes_to_the_album(credited: list[SimpleNamespace]) -> None:
++    """Sorted by album, a jump to K opens at the first album filed under K."""
++    page = page_playlist_items(credited, "album", None, 0, 10, starts_from="k")
++    assert _names(page) == ["t6", "t5"]
++
++
++def test_the_page_above_an_artist_jump_walks_up_from_it(credited: list[SimpleNamespace]) -> None:
++    """Above a jump to K in artist order: reverse order, only earlier artists, nearest first."""
++    page = page_playlist_items(credited, "artist_desc", None, 0, 10, starts_before="k")
++    assert _names(page) == ["t6", "t2"]
++
++
++def test_the_page_above_an_album_jump_walks_up_from_it(credited: list[SimpleNamespace]) -> None:
++    """Above a jump to K in album order: reverse order, only earlier albums, nearest first."""
++    page = page_playlist_items(credited, "album_desc", None, 0, 10, starts_before="k")
++    assert _names(page) == ["t3", "t2", "t1", "t4"]
++
++
++def test_artist_jumps_fold_accents(credited: list[SimpleNamespace]) -> None:
++    """The artist Ärtig is filed under A, so a jump to A reaches it before Kate Bush."""
++    page = page_playlist_items(credited, "artist", None, 0, 2, starts_from="a")
++    assert _names(page) == ["t2", "t6"]
++
++
++def test_items_without_an_artist_sit_at_the_top_in_artist_order(
++    credited: list[SimpleNamespace],
++) -> None:
++    """A radio item has no artist, so it is part of the unlettered top of the listing."""
++    radio = SimpleNamespace(name="Radio", sort_name=None, artists=None, album=None, position=9)
++    page = page_playlist_items([*credited, radio], "artist", None, 0, 2)
++    assert _names(page) == ["Radio", "t2"]
++
++
++def test_artist_and_album_orders_can_be_reversed(credited: list[SimpleNamespace]) -> None:
++    """The descending forms exist so a listing can page upwards."""
++    assert _names(page_playlist_items(credited, "artist_desc", None, 0, 2)) == ["t1", "t5"]
++    assert _names(page_playlist_items(credited, "album_desc", None, 0, 2)) == ["t5", "t6"]
+-- 
+2.43.0
+

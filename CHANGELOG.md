@@ -28,6 +28,12 @@ Waiting for the next publish build (patches are committed, not pushed):
   is unchanged. Adds a test that Soloist's own 30 s stall guard fires before the stream's
   20 s watchdog. That test fails until the timeout is decided. Not tried on the add-on.
 
+- A-Z strip on a playlist sorted by artist or album (frontend 0009, server 0012): a jump to K means
+  artists (or albums) starting with K, not track titles. The server files each item under the
+  name the order follows, with the same accent folding as the sort, and gets the descending
+  forms artist_desc and album_desc so the listing can page upwards from a jump. Library
+  listings keep to the name orders. Not tried in a browser.
+
 - Now-playing dashboard redesign (frontend 0008): the portrait fills the left half of the screen
   edge to edge and fades into the background, with the album cover as a thumbnail on it; text,
   lyrics and timeline sit on the right. The picture is requested at 1024 px so it is sharp, the
