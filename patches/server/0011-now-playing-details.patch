@@ -1,0 +1,140 @@
+From 42dc2aeaaada7531d90104618e7a9063ec12b6aa Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Tue, 13 Oct 2026 13:45:20 +0000
+Subject: [PATCH] Send the stream format and the artist image with the
+ now-playing media
+
+The now-playing dashboard needs what the stream is (codec, sample rate, bit depth and
+bitrate) and an artist portrait to show. Both go in the media's custom data: the format
+from the queue item's stream details, and the artist image through the image proxy.
+Helpers and their tests come first.
+---
+ .../controllers/player_queues/controller.py   | 11 ++++++
+ music_assistant/helpers/now_playing.py        | 36 +++++++++++++++++
+ tests/helpers/test_now_playing.py             | 39 +++++++++++++++++++
+ 3 files changed, 86 insertions(+)
+ create mode 100644 music_assistant/helpers/now_playing.py
+ create mode 100644 tests/helpers/test_now_playing.py
+
+diff --git a/music_assistant/controllers/player_queues/controller.py b/music_assistant/controllers/player_queues/controller.py
+index e0b1664..007bade 100644
+--- a/music_assistant/controllers/player_queues/controller.py
++++ b/music_assistant/controllers/player_queues/controller.py
+@@ -88,6 +88,7 @@ from music_assistant.controllers.players.helpers import is_own_client_player
+ from music_assistant.controllers.webserver.helpers.auth_middleware import get_current_user
+ from music_assistant.helpers.api import api_command
+ from music_assistant.helpers.config_entries import PLAYBACK_TARGET_TYPES
++from music_assistant.helpers.now_playing import artist_image, audio_format_summary
+ from music_assistant.helpers.uri import parse_uri
+ from music_assistant.models.music_provider import ProviderStreamLimitError
+ from music_assistant.models.player import Player, PlayerMedia
+@@ -1686,9 +1687,19 @@ class PlayerQueuesController(QueueLoaderMixin, PlaybackTrackerMixin, StreamFeede
+             queue_session_id=queue_data.session_id,
+             custom_data={
+                 "original_uri": queue_item.uri,
++                "audio_format": audio_format_summary(
++                    queue_item.streamdetails.audio_format if queue_item.streamdetails else None
++                ),
+             },
+         )
+         if queue_item.media_item:
++            if (
++                artist_img := artist_image(queue_item.media_item)
++            ) is not None and media.custom_data:
++                # the artist portrait is what the now-playing dashboard shows behind the title
++                media.custom_data["artist_image_url"] = self.mass.metadata.get_image_url(
++                    artist_img, size=512, image_format="jpeg", prefer_stream_server=True
++                )
+             media.title = queue_item.media_item.name
+             media.artist = getattr(queue_item.media_item, "artist_str", "")
+             media.album = (
+diff --git a/music_assistant/helpers/now_playing.py b/music_assistant/helpers/now_playing.py
+new file mode 100644
+index 0000000..f579c3e
+--- /dev/null
++++ b/music_assistant/helpers/now_playing.py
+@@ -0,0 +1,36 @@
++"""Details the now-playing dashboard shows beyond the title and cover: stream format and artist image."""
++
++from __future__ import annotations
++
++from typing import TYPE_CHECKING, Any
++
++if TYPE_CHECKING:
++    from music_assistant_models.media_items import AudioFormat
++
++
++def audio_format_summary(audio_format: AudioFormat | None) -> dict[str, Any] | None:
++    """
++    Return the stream format as plain values the dashboard can show.
++
++    :param audio_format: The format the stream is delivered in, if it is known yet.
++    """
++    if audio_format is None:
++        return None
++    return {
++        "content_type": audio_format.content_type.value,
++        "sample_rate": audio_format.sample_rate,
++        "bit_depth": audio_format.bit_depth,
++        "bit_rate": audio_format.bit_rate,
++    }
++
++
++def artist_image(media_item: object) -> Any | None:
++    """
++    Return the image of the first artist of a media item that has one.
++
++    :param media_item: The track, album or other item being played.
++    """
++    for artist in getattr(media_item, "artists", None) or []:
++        if (image := getattr(artist, "image", None)) is not None:
++            return image
++    return None
+diff --git a/tests/helpers/test_now_playing.py b/tests/helpers/test_now_playing.py
+new file mode 100644
+index 0000000..d5cb88b
+--- /dev/null
++++ b/tests/helpers/test_now_playing.py
+@@ -0,0 +1,39 @@
++"""Tests for the extra now-playing details the dashboard shows: stream format and artist image."""
++
++from __future__ import annotations
++
++from types import SimpleNamespace
++
++from music_assistant_models.enums import ContentType
++from music_assistant_models.media_items import AudioFormat
++
++from music_assistant.helpers.now_playing import artist_image, audio_format_summary
++
++
++def test_summary_carries_the_stream_format() -> None:
++    """The dashboard needs codec, sample rate, bit depth and bitrate of the stream."""
++    fmt = AudioFormat(content_type=ContentType.FLAC, sample_rate=96000, bit_depth=24, bit_rate=2300)
++    assert audio_format_summary(fmt) == {
++        "content_type": "flac",
++        "sample_rate": 96000,
++        "bit_depth": 24,
++        "bit_rate": 2300,
++    }
++
++
++def test_summary_is_none_without_a_format() -> None:
++    """No stream format known yet means nothing to show."""
++    assert audio_format_summary(None) is None
++
++
++def test_artist_image_is_the_first_artist_that_has_one() -> None:
++    """A track's artist image comes from its first artist; an artist without one is skipped."""
++    image = SimpleNamespace(path="https://example.test/a.jpg")
++    artists = [SimpleNamespace(name="A", image=None), SimpleNamespace(name="B", image=image)]
++    assert artist_image(SimpleNamespace(artists=artists)) is image
++
++
++def test_artist_image_is_none_without_artists() -> None:
++    """Items with no artists (radio, podcasts) have no artist image."""
++    assert artist_image(SimpleNamespace(artists=None)) is None
++    assert artist_image(SimpleNamespace()) is None
+-- 
+2.43.0
+
