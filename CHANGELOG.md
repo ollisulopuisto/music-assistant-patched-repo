@@ -28,6 +28,14 @@ Waiting for the next publish build (patches are committed, not pushed):
   is unchanged. Adds a test that Soloist's own 30 s stall guard fires before the stream's
   20 s watchdog. That test fails until the timeout is decided. Not tried on the add-on.
 
+- Now-playing dashboard redesign (frontend 0008): the portrait fills the left half of the screen
+  edge to edge and fades into the background, with the album cover as a thumbnail on it; text,
+  lyrics and timeline sit on the right. The picture is requested at 1024 px so it is sharp, the
+  lyrics are scaled to the column, and titles use Syne with Outfit for the rest (both embedded,
+  SIL OFL 1.1). Needs an HTTPS Base URL on the MA server for the Cast dashboard to load this
+  frontend at all (Settings > Core > Web server > Internal URL); through Remote Access the
+  Chromecast loads the official dashboard instead. Layout checked in a static render, not on a TV.
+
 - Now-playing dashboard: the artwork is the artist's portrait (album art when there is none),
   sized to cover about half a 16:9 screen, with the text and timeline beside it in landscape.
   Under the title it shows the stream format (codec, sample rate, bit depth for lossless,
