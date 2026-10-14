@@ -1,0 +1,546 @@
+From 3ab8d31e74e7881f079a6ce04cf24944216835a4 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Wed, 14 Oct 2026 06:24:58 +0000
+Subject: [PATCH] Close a now-playing dashboard that stays open beside idle
+ playback
+
+A Cast receiver loops its keepalive media for as long as a dashboard is open, and each
+restart of it wakes whatever is wired to the device (a bedroom amp, in one report) all night.
+A now-playing dashboard is now closed, and the receiver app quit, once the device's
+playback has been idle for a set time. The time is a Chromecast provider setting
+(minutes, default 30, 0 keeps dashboards open). Party and quiz dashboards are left alone.
+The timer counts from when playback went idle and is cancelled by anything playing.
+Tests first for the timer and for how the dashboards feed it.
+---
+ .../providers/chromecast/constants.py         |   4 +
+ .../providers/chromecast/dashboard.py         |  64 ++++++++-
+ .../providers/chromecast/idle_close.py        |  74 +++++++++++
+ .../providers/chromecast/provider.py          |  27 +++-
+ .../chromecast/test_dashboard_idle_wiring.py  | 122 ++++++++++++++++++
+ .../chromecast/test_idle_dashboard_close.py   | 102 +++++++++++++++
+ 6 files changed, 387 insertions(+), 6 deletions(-)
+ create mode 100644 music_assistant/providers/chromecast/idle_close.py
+ create mode 100644 tests/providers/chromecast/test_dashboard_idle_wiring.py
+ create mode 100644 tests/providers/chromecast/test_idle_dashboard_close.py
+
+diff --git a/music_assistant/providers/chromecast/constants.py b/music_assistant/providers/chromecast/constants.py
+index 901e818..ef6aa0a 100644
+--- a/music_assistant/providers/chromecast/constants.py
++++ b/music_assistant/providers/chromecast/constants.py
+@@ -27,6 +27,10 @@ APP_LAUNCH_TIMEOUT = 30.0
+ # follow-up command can reuse the Cast session instead of starting a new one.
+ APP_QUIT_DELAY = 10.0
+ 
++# provider setting: minutes of idle playback after which a now-playing dashboard is closed
++CONF_DASHBOARD_IDLE_CLOSE = "dashboard_idle_close"
++DEFAULT_DASHBOARD_IDLE_CLOSE_MINUTES = 30
++
+ # keepalive media the cast receiver plays while showing a dashboard
+ DASHBOARD_KEEPALIVE_SUFFIXES = ("/dashboard-keepalive.mp4", "/keepalive.png")
+ 
+diff --git a/music_assistant/providers/chromecast/dashboard.py b/music_assistant/providers/chromecast/dashboard.py
+index 37b177d..465d6de 100644
+--- a/music_assistant/providers/chromecast/dashboard.py
++++ b/music_assistant/providers/chromecast/dashboard.py
+@@ -9,19 +9,25 @@ from uuid import UUID
+ 
+ import pychromecast
+ from music_assistant_models.dashboard import DashboardDevice
+-from music_assistant_models.enums import DashboardType
++from music_assistant_models.enums import DashboardType, EventType, PlaybackState
+ from music_assistant_models.errors import PlayerUnavailableError
+ from pychromecast.const import CAST_TYPE_CHROMECAST
+ from pychromecast.socket_client import CONNECTION_STATUS_CONNECTED, CONNECTION_STATUS_LOST
+ 
+-from .constants import MASS_APP_ID
++from .constants import (
++    CONF_DASHBOARD_IDLE_CLOSE,
++    DEFAULT_DASHBOARD_IDLE_CLOSE_MINUTES,
++    MASS_APP_ID,
++)
+ from .helpers import send_hide_dashboard, send_show_dashboard
++from .idle_close import IdleDashboardCloser
+ from .player import ChromecastPlayer
+ 
+ if TYPE_CHECKING:
+     import asyncio
+     from collections.abc import Callable
+ 
++    from music_assistant_models.event import MassEvent
+     from pychromecast.controllers.receiver import CastStatus
+     from pychromecast.controllers.receiver import CastStatusListener as ReceiverStatusListener
+     from pychromecast.models import CastInfo
+@@ -50,6 +56,8 @@ class _ActiveDashboardCast:
+     cast_session_id: str | None
+     listener: _DashboardCastListener
+     loss_timer: asyncio.TimerHandle | None = None
++    # which dashboard is showing; only a now-playing one is closed for idle playback
++    dashboard: DashboardType | None = None
+ 
+ 
+ class ChromecastDashboards:
+@@ -69,6 +77,22 @@ class ChromecastDashboards:
+         self._dashboard_connections: dict[str, pychromecast.Chromecast] = {}
+         self._active_casts: dict[str, _ActiveDashboardCast] = {}
+         self._unloaded = False
++        # a now-playing dashboard left open beside idle playback keeps the receiver looping its
++        # keepalive media, which wakes anything wired to the device, so it is closed after a while
++        configured = self.provider.config.get_value(
++            CONF_DASHBOARD_IDLE_CLOSE, DEFAULT_DASHBOARD_IDLE_CLOSE_MINUTES
++        )
++        self._idle_close_minutes = (
++            int(configured)
++            if isinstance(configured, int | float)
++            else DEFAULT_DASHBOARD_IDLE_CLOSE_MINUTES
++        )
++        self._idle_closer = IdleDashboardCloser(
++            self.mass.loop, self._idle_close_minutes * 60, self._close_idle
++        )
++        self._unsubscribe_players = self.mass.subscribe(
++            self._on_player_event, event_filter=EventType.PLAYER_UPDATED
++        )
+ 
+     def register(self, uuid: UUID, cast_info: CastInfo) -> None:
+         """
+@@ -101,6 +125,8 @@ class ChromecastDashboards:
+     async def unload(self) -> None:
+         """Unregister all dashboard endpoints and disconnect cached on-demand connections."""
+         self._unloaded = True
++        self._unsubscribe_players()
++        self._idle_closer.stop()
+         for unregister_callback in list(self._unregister_callbacks.values()):
+             unregister_callback()
+         self._unregister_callbacks.clear()
+@@ -176,8 +202,9 @@ class ChromecastDashboards:
+         session_id = chromecast.status.session_id if chromecast.status else None
+         listener = _DashboardCastListener(self, device_id)
+         self._active_casts[device_id] = _ActiveDashboardCast(
+-            cast_session_id=session_id, listener=listener
++            cast_session_id=session_id, listener=listener, dashboard=dashboard
+         )
++        self._observe_idle(device_id)
+         chromecast.register_status_listener(cast("ReceiverStatusListener", listener))
+         chromecast.register_connection_listener(cast("ConnectionStatusListener", listener))
+ 
+@@ -287,6 +314,36 @@ class ChromecastDashboards:
+             # non-blocking: close the socket, the daemon thread exits on its own
+             chromecast.disconnect(0)
+ 
++    def _on_player_event(self, event: MassEvent) -> None:
++        """Re-check idle playback for a player whose device is showing a now-playing dashboard."""
++        if event.object_id and event.object_id in self._active_casts:
++            self._observe_idle(event.object_id)
++
++    def _observe_idle(self, device_id: str) -> None:
++        """Tell the idle closer whether a device showing a now-playing dashboard is playing."""
++        entry = self._active_casts.get(device_id)
++        if entry is None or entry.dashboard != DashboardType.NOW_PLAYING:
++            return
++        player = self.mass.players.get_player(device_id)
++        playing = player is not None and player.playback_state == PlaybackState.PLAYING
++        self._idle_closer.observe(device_id, playing=playing)
++
++    async def _close_idle(self, device_id: str) -> None:
++        """Quit the receiver app and end the dashboard session of a device that stayed idle."""
++        if device_id not in self._active_casts:
++            return
++        self.logger.info(
++            "Closing the dashboard on %s: nothing has played for %d minutes",
++            device_id,
++            self._idle_close_minutes,
++        )
++        chromecast = self._get_existing_chromecast(device_id)
++        if chromecast is not None and chromecast.app_id == MASS_APP_ID:
++            # quit before hiding: hiding drops an on-demand connection, and the app quitting
++            # is what stops the keepalive loop
++            await self.mass.loop.run_in_executor(None, chromecast.quit_app)
++        await self.mass.dashboard.hide_dashboard(f"chromecast_{device_id}")
++
+     def _cancel_loss_timer(self, device_id: str) -> None:
+         """Cancel the pending connection-loss timer for device_id, if any."""
+         entry = self._active_casts.get(device_id)
+@@ -296,6 +353,7 @@ class ChromecastDashboards:
+ 
+     def _drop_active_cast(self, device_id: str) -> None:
+         """Stop tracking device_id: cancel its loss timer and invalidate its listener."""
++        self._idle_closer.forget(device_id)
+         entry = self._active_casts.pop(device_id, None)
+         if entry is None:
+             return
+diff --git a/music_assistant/providers/chromecast/idle_close.py b/music_assistant/providers/chromecast/idle_close.py
+new file mode 100644
+index 0000000..73bb228
+--- /dev/null
++++ b/music_assistant/providers/chromecast/idle_close.py
+@@ -0,0 +1,74 @@
++"""Closes a now-playing dashboard that has been showing next to idle playback for too long."""
++
++from __future__ import annotations
++
++import asyncio
++from collections.abc import Callable, Coroutine
++from typing import Any
++
++
++class IdleDashboardCloser:
++    """
++    Ends a dashboard once its device's playback has been idle for a set time.
++
++    A Cast receiver loops its keepalive media for as long as a dashboard is open, which keeps
++    the device (and anything wired to it) awake. Playback going idle starts a timer, playback
++    coming back cancels it, and the dashboard is closed when the timer runs out.
++    """
++
++    def __init__(
++        self,
++        loop: asyncio.AbstractEventLoop,
++        idle_seconds: float,
++        close: Callable[[str], Coroutine[Any, Any, None]],
++    ) -> None:
++        """
++        Initialize the closer.
++
++        :param loop: The event loop the timers run on.
++        :param idle_seconds: How long playback may stay idle; zero or less disables closing.
++        :param close: Called with the key of a dashboard to close.
++        """
++        self._loop = loop
++        self._idle_seconds = idle_seconds
++        self._close = close
++        self._timers: dict[str, asyncio.TimerHandle] = {}
++        self._tasks: set[asyncio.Task[None]] = set()
++
++    def observe(self, key: str, *, playing: bool) -> None:
++        """
++        Record whether a dashboard's device is playing.
++
++        :param key: Identifies the dashboard.
++        :param playing: Whether something is playing on its device now.
++        """
++        if self._idle_seconds <= 0:
++            return
++        if playing:
++            self.forget(key)
++        elif key not in self._timers:
++            # the period counts from when playback went idle, not from each status after it
++            self._timers[key] = self._loop.call_later(self._idle_seconds, self._fire, key)
++
++    def forget(self, key: str) -> None:
++        """
++        Stop timing a dashboard, for example because it ended.
++
++        :param key: Identifies the dashboard.
++        """
++        if timer := self._timers.pop(key, None):
++            timer.cancel()
++
++    def stop(self) -> None:
++        """Cancel every pending close."""
++        for key in list(self._timers):
++            self.forget(key)
++        for task in list(self._tasks):
++            task.cancel()
++
++    def _fire(self, key: str) -> None:
++        """Start closing a dashboard whose device stayed idle."""
++        self._timers.pop(key, None)
++        task = self._loop.create_task(self._close(key))
++        self._tasks.add(task)
++        task.add_done_callback(self._tasks.discard)
+diff --git a/music_assistant/providers/chromecast/provider.py b/music_assistant/providers/chromecast/provider.py
+index 60de6fd..272aa63 100644
+--- a/music_assistant/providers/chromecast/provider.py
++++ b/music_assistant/providers/chromecast/provider.py
+@@ -11,6 +11,8 @@ from typing import TYPE_CHECKING, cast
+ from uuid import UUID
+ 
+ import pychromecast
++from music_assistant_models.config_entries import ConfigEntry
++from music_assistant_models.enums import ConfigEntryType
+ from pychromecast.controllers.multizone import MultizoneManager
+ from pychromecast.discovery import CastBrowser, SimpleCastListener
+ 
+@@ -23,14 +25,18 @@ from music_assistant.constants import (
+ from music_assistant.helpers.json import SerializableType
+ from music_assistant.models.player_provider import PlayerProvider
+ 
+-from .constants import MULTICHANNEL_RECHECK_INTERVAL
++from .constants import (
++    CONF_DASHBOARD_IDLE_CLOSE,
++    DEFAULT_DASHBOARD_IDLE_CLOSE_MINUTES,
++    MULTICHANNEL_RECHECK_INTERVAL,
++)
+ from .dashboard import ChromecastDashboards
+ from .helpers import ChromecastInfo, without_ipv6_host_services
+ from .player import ChromecastPlayer
+ from .sendspin_bridge import SendspinBridgeManager
+ 
+ if TYPE_CHECKING:
+-    from music_assistant_models.config_entries import ConfigEntry, ProviderConfig
++    from music_assistant_models.config_entries import ProviderConfig
+     from music_assistant_models.enums import ProviderFeature
+     from music_assistant_models.provider import ProviderManifest
+     from pychromecast.models import CastInfo
+@@ -79,7 +85,22 @@ class ChromecastProvider(PlayerProvider):
+ 
+     async def get_config_entries(self) -> tuple[ConfigEntry, ...]:
+         """Return Config entries to configure this provider."""
+-        return (CONF_ENTRY_MANUAL_DISCOVERY_IPS,)
++        return (
++            CONF_ENTRY_MANUAL_DISCOVERY_IPS,
++            ConfigEntry(
++                key=CONF_DASHBOARD_IDLE_CLOSE,
++                type=ConfigEntryType.INTEGER,
++                label="Close the now-playing dashboard when idle (minutes)",
++                description="A Cast receiver keeps looping a keepalive video while a dashboard "
++                "is open, which wakes any amplifier or TV wired to the device. A now-playing "
++                "dashboard is closed, and the receiver app quit, once nothing has played on the "
++                "device for this many minutes. 0 keeps dashboards open until they are "
++                "disconnected. Takes effect after the provider is reloaded.",
++                default_value=DEFAULT_DASHBOARD_IDLE_CLOSE_MINUTES,
++                range=(0, 720),
++                required=False,
++            ),
++        )
+ 
+     async def discover_players(self) -> None:
+         """Discover Cast players on the network."""
+diff --git a/tests/providers/chromecast/test_dashboard_idle_wiring.py b/tests/providers/chromecast/test_dashboard_idle_wiring.py
+new file mode 100644
+index 0000000..8e3d158
+--- /dev/null
++++ b/tests/providers/chromecast/test_dashboard_idle_wiring.py
+@@ -0,0 +1,122 @@
++"""Tests for how the Chromecast dashboards feed idle playback to the idle closer."""
++
++from __future__ import annotations
++
++from types import SimpleNamespace
++from unittest.mock import AsyncMock, MagicMock
++from uuid import uuid4
++
++import pytest
++from music_assistant_models.enums import DashboardType, PlaybackState
++
++from music_assistant.providers.chromecast.constants import MASS_APP_ID
++from music_assistant.providers.chromecast.dashboard import (
++    ChromecastDashboards,
++    _ActiveDashboardCast,
++)
++
++from .test_dashboard_liveness import _chromecast, _make_dashboards
++
++pytestmark = pytest.mark.asyncio
++
++
++def _dashboards_showing(
++    dashboard: DashboardType, state: PlaybackState
++) -> tuple[ChromecastDashboards, str, MagicMock]:
++    """Return dashboards with one device showing `dashboard` while its player is in `state`."""
++    dashboards = _make_dashboards()
++    device_id = str(uuid4())
++    dashboards._active_casts[device_id] = _ActiveDashboardCast(
++        cast_session_id="s", listener=MagicMock(), dashboard=dashboard
++    )
++    dashboards.mass.players.get_player.return_value = SimpleNamespace(playback_state=state)
++    closer = MagicMock()
++    dashboards._idle_closer = closer
++    return dashboards, device_id, closer
++
++
++async def test_idle_playback_under_a_now_playing_dashboard_starts_the_clock() -> None:
++    """A now-playing dashboard beside an idle player is reported as not playing."""
++    dashboards, device_id, closer = _dashboards_showing(
++        DashboardType.NOW_PLAYING, PlaybackState.IDLE
++    )
++    dashboards._observe_idle(device_id)
++    closer.observe.assert_called_once_with(device_id, playing=False)
++
++
++async def test_playing_under_a_now_playing_dashboard_is_reported_as_playing() -> None:
++    """Something playing keeps the dashboard."""
++    dashboards, device_id, closer = _dashboards_showing(
++        DashboardType.NOW_PLAYING, PlaybackState.PLAYING
++    )
++    dashboards._observe_idle(device_id)
++    closer.observe.assert_called_once_with(device_id, playing=True)
++
++
++async def test_a_party_dashboard_is_never_closed_for_idle_playback() -> None:
++    """Only a now-playing dashboard is tied to playback; a party screen stays up."""
++    dashboards, device_id, closer = _dashboards_showing(DashboardType.PARTY, PlaybackState.IDLE)
++    dashboards._observe_idle(device_id)
++    closer.observe.assert_not_called()
++
++
++async def test_a_player_event_for_another_device_is_ignored() -> None:
++    """Events for players with no dashboard do not reach the closer."""
++    dashboards, _device_id, closer = _dashboards_showing(
++        DashboardType.NOW_PLAYING, PlaybackState.IDLE
++    )
++    dashboards._on_player_event(SimpleNamespace(object_id="some-other-player"))  # type: ignore[arg-type]
++    closer.observe.assert_not_called()
++
++
++async def test_closing_an_idle_dashboard_quits_the_receiver_then_ends_the_session() -> None:
++    """The receiver app is quit first, which stops the keepalive loop, then the session ends."""
++    dashboards, device_id, _closer = _dashboards_showing(
++        DashboardType.NOW_PLAYING, PlaybackState.IDLE
++    )
++    chromecast = _chromecast(app_id=MASS_APP_ID)
++    chromecast.app_id = MASS_APP_ID
++    dashboards._dashboard_connections[device_id] = chromecast
++    calls: list[str] = []
++    chromecast.quit_app.side_effect = lambda: calls.append("quit")
++    dashboards.mass.dashboard.hide_dashboard = AsyncMock(  # type: ignore[method-assign]
++        side_effect=lambda _id: calls.append("hide")
++    )
++
++    await dashboards._close_idle(device_id)
++
++    assert calls == ["quit", "hide"]
++    dashboards.mass.dashboard.hide_dashboard.assert_awaited_once_with(f"chromecast_{device_id}")
++
++
++async def test_closing_does_not_quit_an_app_that_is_not_ours() -> None:
++    """If another app took over the device, only the session is ended."""
++    dashboards, device_id, _closer = _dashboards_showing(
++        DashboardType.NOW_PLAYING, PlaybackState.IDLE
++    )
++    chromecast = _chromecast(app_id="SOMEOTHERAPP")
++    chromecast.app_id = "SOMEOTHERAPP"
++    dashboards._dashboard_connections[device_id] = chromecast
++    dashboards.mass.dashboard.hide_dashboard = AsyncMock()  # type: ignore[method-assign]
++
++    await dashboards._close_idle(device_id)
++
++    chromecast.quit_app.assert_not_called()
++    dashboards.mass.dashboard.hide_dashboard.assert_awaited_once()
++
++
++async def test_closing_a_dashboard_that_already_ended_does_nothing() -> None:
++    """A timer firing after the dashboard ended by itself changes nothing."""
++    dashboards = _make_dashboards()
++    dashboards.mass.dashboard.hide_dashboard = AsyncMock()  # type: ignore[method-assign]
++    await dashboards._close_idle(str(uuid4()))
++    dashboards.mass.dashboard.hide_dashboard.assert_not_awaited()
++
++
++async def test_ending_a_session_stops_timing_it() -> None:
++    """Dropping a dashboard cancels its idle timer."""
++    dashboards, device_id, closer = _dashboards_showing(
++        DashboardType.NOW_PLAYING, PlaybackState.IDLE
++    )
++    dashboards._drop_active_cast(device_id)
++    closer.forget.assert_called_once_with(device_id)
+diff --git a/tests/providers/chromecast/test_idle_dashboard_close.py b/tests/providers/chromecast/test_idle_dashboard_close.py
+new file mode 100644
+index 0000000..f3b304a
+--- /dev/null
++++ b/tests/providers/chromecast/test_idle_dashboard_close.py
+@@ -0,0 +1,102 @@
++"""
++Tests for closing a now-playing dashboard that has shown next to idle playback for too long.
++
++A Cast receiver keeps looping its keepalive media for as long as a dashboard is open, which
++wakes whatever is wired to the device. The closer ends the dashboard once playback has been
++idle for the configured time, and never while something is playing.
++"""
++
++from __future__ import annotations
++
++import asyncio
++
++import pytest
++
++from music_assistant.providers.chromecast.idle_close import IdleDashboardCloser
++
++pytestmark = pytest.mark.asyncio
++
++IDLE = 0.05
++
++
++def _closer(idle_seconds: float = IDLE) -> tuple[IdleDashboardCloser, list[str]]:
++    closed: list[str] = []
++
++    async def close(key: str) -> None:
++        closed.append(key)
++
++    return IdleDashboardCloser(asyncio.get_running_loop(), idle_seconds, close), closed
++
++
++async def test_a_dashboard_is_closed_once_playback_has_been_idle_long_enough() -> None:
++    """Idle for the whole period closes the dashboard."""
++    closer, closed = _closer()
++    closer.observe("a", playing=False)
++    await asyncio.sleep(IDLE * 3)
++    assert closed == ["a"]
++
++
++async def test_playback_starting_cancels_the_pending_close() -> None:
++    """Something playing again before the period ends keeps the dashboard."""
++    closer, closed = _closer()
++    closer.observe("a", playing=False)
++    await asyncio.sleep(IDLE / 3)
++    closer.observe("a", playing=True)
++    await asyncio.sleep(IDLE * 3)
++    assert closed == []
++
++
++async def test_repeated_idle_reports_do_not_restart_the_clock() -> None:
++    """The period counts from when playback went idle, not from the latest status."""
++    closer, closed = _closer()
++    closer.observe("a", playing=False)
++    await asyncio.sleep(IDLE / 2)
++    closer.observe("a", playing=False)
++    await asyncio.sleep(IDLE * 0.8)
++    assert closed == ["a"]
++
++
++async def test_a_dashboard_is_closed_only_once() -> None:
++    """After the close fired, further idle reports do not queue another one for it."""
++    closer, closed = _closer()
++    closer.observe("a", playing=False)
++    await asyncio.sleep(IDLE * 2)
++    assert closed == ["a"]
++    closer.forget("a")
++    await asyncio.sleep(IDLE * 2)
++    assert closed == ["a"]
++
++
++async def test_forgetting_a_dashboard_cancels_its_close() -> None:
++    """A dashboard that ended by itself needs no close."""
++    closer, closed = _closer()
++    closer.observe("a", playing=False)
++    closer.forget("a")
++    await asyncio.sleep(IDLE * 3)
++    assert closed == []
++
++
++async def test_a_period_of_zero_never_closes_anything() -> None:
++    """Zero switches the feature off."""
++    closer, closed = _closer(0)
++    closer.observe("a", playing=False)
++    await asyncio.sleep(0.1)
++    assert closed == []
++
++
++async def test_devices_are_timed_separately() -> None:
++    """One device playing does not keep another's idle dashboard open."""
++    closer, closed = _closer()
++    closer.observe("a", playing=False)
++    closer.observe("b", playing=True)
++    await asyncio.sleep(IDLE * 3)
++    assert closed == ["a"]
++
++
++async def test_stopping_the_closer_cancels_everything_pending() -> None:
++    """Unloading the provider must not leave timers behind."""
++    closer, closed = _closer()
++    closer.observe("a", playing=False)
++    closer.stop()
++    await asyncio.sleep(IDLE * 3)
++    assert closed == []
+-- 
+2.43.0
+

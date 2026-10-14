@@ -28,6 +28,15 @@ Waiting for the next publish build (patches are committed, not pushed):
   is unchanged. Adds a test that Soloist's own 30 s stall guard fires before the stream's
   20 s watchdog. That test fails until the timeout is decided. Not tried on the add-on.
 
+- A now-playing dashboard on a Chromecast is closed, and the receiver app quit, once nothing has
+  played on the device for 30 minutes (server 0013). A Cast receiver loops its keepalive video
+  for as long as a dashboard is open, and each restart of it woke an amplifier wired to the
+  bedroom device all night. The time is a Chromecast provider setting, "Close the now-playing
+  dashboard when idle (minutes)", default 30, and 0 keeps dashboards open. Party and quiz
+  dashboards are left alone. Taking effect needs a provider reload. The keepalive itself is
+  played by the receiver app (hosted by Music Assistant), so it cannot be switched off from the
+  server. Not tried on a device.
+
 - A-Z strip on a playlist sorted by artist or album (frontend 0009, server 0012): a jump to K means
   artists (or albums) starting with K, not track titles. The server files each item under the
   name the order follows, with the same accent folding as the sort, and gets the descending
