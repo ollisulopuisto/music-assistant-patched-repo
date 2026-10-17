@@ -17,7 +17,7 @@ Helpers and their tests come first.
  create mode 100644 tests/helpers/test_now_playing.py
 
 diff --git a/music_assistant/controllers/player_queues/controller.py b/music_assistant/controllers/player_queues/controller.py
-index e0b1664..007bade 100644
+index 6dc6279..8fd908e 100644
 --- a/music_assistant/controllers/player_queues/controller.py
 +++ b/music_assistant/controllers/player_queues/controller.py
 @@ -88,6 +88,7 @@ from music_assistant.controllers.players.helpers import is_own_client_player
@@ -28,7 +28,7 @@ index e0b1664..007bade 100644
  from music_assistant.helpers.uri import parse_uri
  from music_assistant.models.music_provider import ProviderStreamLimitError
  from music_assistant.models.player import Player, PlayerMedia
-@@ -1686,9 +1687,19 @@ class PlayerQueuesController(QueueLoaderMixin, PlaybackTrackerMixin, StreamFeede
+@@ -1700,9 +1701,19 @@ class PlayerQueuesController(QueueLoaderMixin, PlaybackTrackerMixin, StreamFeede
              queue_session_id=queue_data.session_id,
              custom_data={
                  "original_uri": queue_item.uri,
@@ -37,17 +37,17 @@ index e0b1664..007bade 100644
 +                ),
              },
          )
-         if queue_item.media_item:
+         if media_item := queue_item.media_item:
 +            if (
-+                artist_img := artist_image(queue_item.media_item)
++                artist_img := artist_image(media_item)
 +            ) is not None and media.custom_data:
 +                # the artist portrait is what the now-playing dashboard shows behind the title
 +                media.custom_data["artist_image_url"] = self.mass.metadata.get_image_url(
 +                    artist_img, size=512, image_format="jpeg", prefer_stream_server=True
 +                )
-             media.title = queue_item.media_item.name
-             media.artist = getattr(queue_item.media_item, "artist_str", "")
-             media.album = (
+             media.title = media_item.name
+             # a podcast episode has no artists, the podcast name takes the artist line
+             podcast = getattr(media_item, "podcast", None)
 diff --git a/music_assistant/helpers/now_playing.py b/music_assistant/helpers/now_playing.py
 new file mode 100644
 index 0000000..f579c3e

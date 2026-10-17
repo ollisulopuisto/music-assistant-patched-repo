@@ -63,6 +63,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
   SERVER_REPO: music-assistant/server
   IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/ma-server-patched
   ADDON_CONFIG: music-assistant-upnext-test/config.yaml
@@ -499,9 +500,37 @@ jobs:
           done
           exit 1
 
+      - name: Close any open build-failure issue
+        env:
+          VERSION: ${{ needs.resolve.outputs.version }}
+          SERVER_REF: ${{ needs.resolve.outputs.server_ref }}
+        uses: actions/github-script@v9
+        with:
+          script: |
+            const title = "Patched add-on build is failing";
+            const { owner, repo } = context.repo;
+            const existing = await github.paginate(github.rest.issues.listForRepo, {
+              owner, repo, state: "open", labels: "build-failure", per_page: 100,
+            });
+            for (const issue of existing) {
+              if (issue.title === title || issue.labels.some((l) => l.name === "build-failure")) {
+                const version = process.env.VERSION;
+                const serverRef = process.env.SERVER_REF;
+                await github.rest.issues.createComment({
+                  owner, repo, issue_number: issue.number,
+                  body: `The patched add-on build succeeded with version ${version} (upstream ${serverRef}). Closing this issue.`,
+                });
+                await github.rest.issues.update({
+                  owner, repo, issue_number: issue.number,
+                  state: "closed",
+                  state_reason: "completed",
+                });
+              }
+            }
+
   report-failure:
     name: Report a broken build
-    needs: [resolve, frontend, build, publish]
+    needs: [resolve, frontend, verify, build, publish]
     if: failure()
     runs-on: ubuntu-latest
     steps:

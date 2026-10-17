@@ -8,6 +8,9 @@ which the build writes.
 
 ## [Unreleased]
 
+- Upstream 2.10.7: `0011-now-playing-details.patch` re-based on `music_assistant/controllers/player_queues/controller.py` where upstream refactored media item handling into `if media_item := queue_item.media_item:` and added podcast/album handling; all server and frontend patches apply cleanly.
+- Build workflow: automatically comment on and close any open `build-failure` issue when the publish job succeeds, and set `FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"` across workflows.
+
 Upstream 2.10.6 (9.10.2026): `0122-preserve-dsd-stereo-downmix.patch` re-based, its `test_ffmpeg.py` hunk no longer applied; all 14 server and 4 frontend patches apply and the affected tests pass on 2.10.6.
 
 Waiting for the next publish build (patches are committed, not pushed):
