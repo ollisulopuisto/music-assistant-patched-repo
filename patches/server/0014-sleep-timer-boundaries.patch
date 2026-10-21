@@ -1,0 +1,560 @@
+From 37949a835637fd5043f9bc0146f86c08a28ae31c Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Wed, 21 Oct 2026 17:47:26 +0000
+Subject: [PATCH] Sleep timer: stop at the end of a track, an album or a
+ chapter
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_016bdM1DxXcha5BLMHxDaXkJ
+---
+ .../controllers/players/controller.py         |  85 ++++++++++-
+ music_assistant/helpers/sleep_boundary.py     | 132 ++++++++++++++++++
+ .../players/test_player_controller.py         | 108 ++++++++++++++
+ tests/helpers/test_sleep_boundary.py          | 124 ++++++++++++++++
+ 4 files changed, 443 insertions(+), 6 deletions(-)
+ create mode 100644 music_assistant/helpers/sleep_boundary.py
+ create mode 100644 tests/helpers/test_sleep_boundary.py
+
+diff --git a/music_assistant/controllers/players/controller.py b/music_assistant/controllers/players/controller.py
+index 0f07832..708099f 100644
+--- a/music_assistant/controllers/players/controller.py
++++ b/music_assistant/controllers/players/controller.py
+@@ -107,6 +107,16 @@ from music_assistant.helpers.api import api_command
+ from music_assistant.helpers.colors import get_palette_for_url
+ from music_assistant.helpers.config_entries import PLAYBACK_TARGET_TYPES
+ from music_assistant.helpers.plugin_engines import create_tts_engine_config_entries
++from music_assistant.helpers.sleep_boundary import (
++    MODE_ALBUM_END,
++    MODE_FIT,
++    MODE_TRACK_END,
++    SleepItem,
++    SleepTarget,
++    pick_target,
++    seconds_until,
++    sleep_item_from,
++)
+ from music_assistant.helpers.util import (
+     enrich_device_mac_address,
+     is_valid_mac_address,
+@@ -162,6 +172,9 @@ AUDIO_SOURCE_CLAIM_TIMEOUT = 30
+ # poll, short enough that a real power off is not left streaming.
+ EXTERNAL_POWER_OFF_STOP_DELAY = 15
+ 
++# a track-end sleep timer stops once it is this close (seconds) to the end it was waiting for
++SLEEP_TIMER_GRACE = 0.5
++
+ # Player types that must be detached from their (sync)group when they power off.
+ # A stereo pair joins a group and leads a sync session exactly like a single speaker does.
+ # A GROUP player has no group of its own to leave: its members are released by its own
+@@ -199,6 +212,8 @@ class PlayerController(AnnouncementsMixin, AudioSourceMixin, ProtocolLinkingMixi
+         self._register_lock = asyncio.Lock()
+         # Track pending protocol player evaluations (delayed to allow all protocols to register)
+         self._pending_protocol_evaluations: dict[str, asyncio.TimerHandle] = {}
++        # where a boundary-based sleep timer (track end, album end, fit) is heading, per player
++        self._sleep_targets: dict[str, SleepTarget] = {}
+         # Serialize delayed evaluations to prevent race conditions
+         self._delayed_evaluation_lock = asyncio.Lock()
+         # Live external AudioSource playing on a player, keyed on player_id
+@@ -625,20 +640,53 @@ class PlayerController(AnnouncementsMixin, AudioSourceMixin, ProtocolLinkingMixi
+         return player.sleep_timer_expires_at
+ 
+     @api_command("players/sleep_timer/set", required_scope=Scope.PLAYERS_CONTROL)
+-    def set_sleep_timer(self, player_id: str, seconds: int) -> float:
++    def set_sleep_timer(self, player_id: str, seconds: int = 0, mode: str = "duration") -> float:
+         """
+         Set a sleep timer for the player.
+ 
+         :param player_id: Player ID to set the timer for.
+-        :param seconds: Delay in seconds before playback is stopped.
+-        """
+-        if seconds <= 0:
++        :param seconds: Delay in seconds before playback is stopped. With mode fit, the time within
++            which the stop has to come.
++        :param mode: duration (stop after the delay), track_end (stop at the end of the playing
++            track or chapter), album_end (stop at the end of the playing album) or fit (stop at the
++            last track or chapter end that comes within the delay).
++        """
++        if mode not in ("duration", MODE_TRACK_END, MODE_ALBUM_END, MODE_FIT):
++            msg = f"Unknown sleep timer mode: {mode}"
++            raise InvalidDataError(msg)
++        if seconds <= 0 and mode in ("duration", MODE_FIT):
+             msg = "Sleep timer duration must be greater than zero seconds"
+             raise InvalidDataError(msg)
+         player = self._get_player_with_redirect(player_id)
++        target: SleepTarget | None = None
++        delay: float = seconds
++        if mode != "duration":
++            view = self._sleep_queue_view(player)
++            if view is not None:
++                items, elapsed, speed = view
++                target = pick_target(mode, seconds, items, elapsed, speed)
++                if target is not None:
++                    delay = seconds_until(target, items, elapsed, speed) or 0.0
++            if target is None and mode != MODE_FIT:
++                msg = "There is no track, chapter or album to wait for the end of"
++                raise InvalidDataError(msg)
++            # fit without a boundary in reach is an ordinary countdown
++        if target is not None:
++            self._sleep_targets[player.player_id] = target
++        else:
++            self._sleep_targets.pop(player.player_id, None)
++        return self._arm_sleep_timer(player, delay)
++
++    def _arm_sleep_timer(self, player: Player, delay: float) -> float:
++        """
++        Start (or restart) the countdown to the sleep timer expiry.
++
++        :param player: Player to stop when the countdown ends.
++        :param delay: Seconds until the timer expires.
++        """
+         try:
+             # guard against absurd durations that overflow the float timestamp math
+-            expires_at = time.time() + seconds
++            expires_at = time.time() + delay
+         except OverflowError:
+             msg = "Sleep timer duration is too large to schedule"
+             raise InvalidDataError(msg) from None
+@@ -646,13 +694,28 @@ class PlayerController(AnnouncementsMixin, AudioSourceMixin, ProtocolLinkingMixi
+         player.update_state()
+         self._signal_sleep_timer_updated(player, expires_at)
+         self.mass.call_later(
+-            seconds,
++            delay,
+             self._handle_sleep_timer_expired,
+             player.player_id,
+             task_id=self._sleep_timer_task_id(player.player_id),
+         )
+         return expires_at
+ 
++    def _sleep_queue_view(self, player: Player) -> tuple[list[SleepItem], float, float] | None:
++        """
++        Describe what is left to play: the items from the playing one on, the seconds played of it, the speed.
++
++        :param player: Player whose active queue to look at.
++        """
++        queue = self.get_active_queue(player)
++        if queue is None or queue.current_index is None:
++            return None
++        queue_data = self.mass.player_queues.queue_data_or_none(queue.queue_id)
++        if queue_data is None:
++            return None
++        items = [sleep_item_from(item) for item in queue_data.items[queue.current_index :]]
++        return items, queue.corrected_elapsed_time, queue.playback_speed or 1.0
++
+     @api_command("players/sleep_timer/clear", required_scope=Scope.PLAYERS_CONTROL)
+     def clear_sleep_timer(self, player_id: str) -> None:
+         """
+@@ -3894,6 +3957,7 @@ class PlayerController(AnnouncementsMixin, AudioSourceMixin, ProtocolLinkingMixi
+         :param player: Player to clear the timer for.
+         """
+         self.mass.cancel_timer(self._sleep_timer_task_id(player.player_id))
++        self._sleep_targets.pop(player.player_id, None)
+         if player.sleep_timer_expires_at is not None:
+             player.set_sleep_timer_expires_at(None)
+             player.update_state()
+@@ -3908,6 +3972,15 @@ class PlayerController(AnnouncementsMixin, AudioSourceMixin, ProtocolLinkingMixi
+         player = self.get_player(player_id)
+         if player is None or player.sleep_timer_expires_at is None:
+             return
++        if (target := self._sleep_targets.get(player_id)) is not None:
++            # the countdown assumed uninterrupted playback; a pause or seek moves the end
++            view = self._sleep_queue_view(player)
++            if view is not None:
++                left = seconds_until(target, *view)
++                if left is not None and left > SLEEP_TIMER_GRACE:
++                    self._arm_sleep_timer(player, left)
++                    return
++        self._sleep_targets.pop(player_id, None)
+         player.set_sleep_timer_expires_at(None)
+         player.update_state()
+         self._signal_sleep_timer_updated(player, None)
+diff --git a/music_assistant/helpers/sleep_boundary.py b/music_assistant/helpers/sleep_boundary.py
+new file mode 100644
+index 0000000..1c48369
+--- /dev/null
++++ b/music_assistant/helpers/sleep_boundary.py
+@@ -0,0 +1,132 @@
++"""Find the point where a sleep timer should stop: the end of a track, an album or a chapter."""
++
++from __future__ import annotations
++
++from dataclasses import dataclass
++from typing import Any
++
++# modes that stop at a boundary in the queue instead of after a fixed delay
++MODE_TRACK_END = "track_end"
++MODE_ALBUM_END = "album_end"
++MODE_FIT = "fit"
++
++
++@dataclass(frozen=True)
++class SleepItem:
++    """What the sleep timer needs to know about one queue item."""
++
++    item_id: str
++    duration: float | None
++    album: str | None
++    # positions (seconds into the item) where a chapter ends, in order
++    chapter_ends: tuple[float, ...] = ()
++
++
++@dataclass(frozen=True)
++class SleepTarget:
++    """A point in the queue to stop at."""
++
++    item_id: str
++    position: float
++
++
++def sleep_item_from(queue_item: Any) -> SleepItem:
++    """
++    Build a SleepItem from a queue item.
++
++    :param queue_item: The queue item to describe.
++    """
++    media_item = queue_item.media_item
++    duration = float(queue_item.duration) if queue_item.duration else None
++    album_obj = getattr(media_item, "album", None)
++    album = getattr(album_obj, "uri", None) if album_obj else None
++    chapters = getattr(getattr(media_item, "metadata", None), "chapters", None) or []
++    ordered = sorted(chapters, key=lambda chapter: chapter.start)
++    ends: list[float] = []
++    for index, chapter in enumerate(ordered):
++        end = chapter.end
++        if not end and index + 1 < len(ordered):
++            end = ordered[index + 1].start
++        if not end:
++            end = duration
++        if end:
++            ends.append(float(end))
++    return SleepItem(queue_item.queue_item_id, duration, album, tuple(ends))
++
++
++def _boundaries(items: list[SleepItem], elapsed: float) -> list[tuple[str, float, float]]:
++    """
++    List every place playback could stop, as (item id, position, media seconds from now).
++
++    Stops at the first item whose length is unknown, since nothing after it can be timed.
++    """
++    found: list[tuple[str, float, float]] = []
++    before = 0.0  # media seconds from now up to the start of the current item
++    for index, item in enumerate(items):
++        if item.duration is None:
++            break
++        start = elapsed if index == 0 else 0.0
++        for position in (*item.chapter_ends, item.duration):
++            if position > start:
++                found.append((item.item_id, position, before + position - start))
++        before += item.duration - start
++    return found
++
++
++def pick_target(
++    mode: str, budget: float, items: list[SleepItem], elapsed: float, speed: float
++) -> SleepTarget | None:
++    """
++    Choose where to stop, or None when the mode finds no such place.
++
++    :param mode: track_end, album_end or fit.
++    :param budget: For fit, the wall-clock seconds the stop must come within.
++    :param items: The queue from the playing item onwards.
++    :param elapsed: Seconds played of the first item.
++    :param speed: Playback speed; media seconds pass this many times faster than the clock.
++    """
++    boundaries = _boundaries(items, elapsed)
++    if not boundaries or not items:
++        return None
++    if mode == MODE_TRACK_END:
++        item_id, position, _ = boundaries[0]
++        return SleepTarget(item_id, position)
++    if mode == MODE_ALBUM_END:
++        album = items[0].album
++        if album is None:
++            return None
++        last = None
++        for item in items:
++            if item.album != album or item.duration is None:
++                break
++            last = item
++        return SleepTarget(last.item_id, last.duration or 0.0) if last else None
++    if mode == MODE_FIT:
++        fitting = [b for b in boundaries if b[2] <= budget * speed]
++        if not fitting:
++            return None
++        item_id, position, _ = fitting[-1]
++        return SleepTarget(item_id, position)
++    return None
++
++
++def seconds_until(
++    target: SleepTarget, items: list[SleepItem], elapsed: float, speed: float
++) -> float | None:
++    """
++    Return the wall-clock seconds until the target is reached, or None if it cannot be timed.
++
++    :param target: The point to stop at.
++    :param items: The queue from the playing item onwards.
++    :param elapsed: Seconds played of the first item.
++    :param speed: Playback speed.
++    """
++    before = 0.0
++    for index, item in enumerate(items):
++        start = elapsed if index == 0 else 0.0
++        if item.item_id == target.item_id:
++            return max(0.0, before + target.position - start) / speed
++        if item.duration is None:
++            return None
++        before += item.duration - start
++    return None
+diff --git a/tests/controllers/players/test_player_controller.py b/tests/controllers/players/test_player_controller.py
+index 3fdf61e..6c1984f 100644
+--- a/tests/controllers/players/test_player_controller.py
++++ b/tests/controllers/players/test_player_controller.py
+@@ -841,6 +841,114 @@ class TestSleepTimer:
+         assert player.sleep_timer_expires_at is None
+         mock_mass.cancel_timer.assert_called_with("player_sleep_timer_player_1")
+ 
++    @staticmethod
++    def _queue_view(
++        controller: PlayerController, mock_mass: MagicMock, durations: list[int], elapsed: float
++    ) -> MagicMock:
++        """Give the controller an active queue of tracks of one album, at the first track."""
++        items = [
++            SimpleNamespace(
++                queue_item_id=f"i{n}",
++                duration=d,
++                media_item=SimpleNamespace(
++                    metadata=SimpleNamespace(chapters=None),
++                    album=SimpleNamespace(uri="library://album/1"),
++                ),
++            )
++            for n, d in enumerate(durations)
++        ]
++        queue = MagicMock(current_index=0, corrected_elapsed_time=elapsed, playback_speed=1.0)
++        queue.queue_id = "player_1"
++        mock_mass.player_queues.queue_data_or_none.return_value = SimpleNamespace(items=items)
++        controller.get_active_queue = MagicMock(return_value=queue)  # type: ignore[method-assign]
++        return queue
++
++    def test_track_end_timer_waits_for_the_end_of_the_track(self, mock_mass: MagicMock) -> None:
++        """The track-end mode schedules the stop for when the playing track runs out."""
++        controller = PlayerController(mock_mass)
++        provider = MockProvider("test_provider", instance_id="test", mass=mock_mass)
++        player = MockPlayer(provider, "player_1", "Player 1")
++        controller._players = {"player_1": player}
++        self._queue_view(controller, mock_mass, [200, 180], elapsed=50)
++
++        expires_at = controller.set_sleep_timer("player_1", 0, "track_end")
++
++        assert expires_at == pytest.approx(time.time() + 150, abs=2)
++        assert mock_mass.call_later.call_args.args[0] == pytest.approx(150)
++
++    def test_fit_timer_picks_the_last_track_end_inside_the_budget(
++        self, mock_mass: MagicMock
++    ) -> None:
++        """The fit mode stops after the last whole track that ends before the time is up."""
++        controller = PlayerController(mock_mass)
++        provider = MockProvider("test_provider", instance_id="test", mass=mock_mass)
++        player = MockPlayer(provider, "player_1", "Player 1")
++        controller._players = {"player_1": player}
++        self._queue_view(controller, mock_mass, [240] * 10, elapsed=0)
++
++        controller.set_sleep_timer("player_1", 30 * 60, "fit")
++
++        assert mock_mass.call_later.call_args.args[0] == pytest.approx(7 * 240)
++
++    def test_fit_timer_falls_back_to_the_plain_delay(self, mock_mass: MagicMock) -> None:
++        """When no boundary fits, the timer is an ordinary countdown."""
++        controller = PlayerController(mock_mass)
++        provider = MockProvider("test_provider", instance_id="test", mass=mock_mass)
++        player = MockPlayer(provider, "player_1", "Player 1")
++        controller._players = {"player_1": player}
++        self._queue_view(controller, mock_mass, [4000], elapsed=0)
++
++        controller.set_sleep_timer("player_1", 600, "fit")
++
++        assert mock_mass.call_later.call_args.args[0] == 600
++
++    def test_track_end_timer_needs_a_queue(self, mock_mass: MagicMock) -> None:
++        """Without anything playing there is no track to wait for."""
++        controller = PlayerController(mock_mass)
++        provider = MockProvider("test_provider", instance_id="test", mass=mock_mass)
++        player = MockPlayer(provider, "player_1", "Player 1")
++        controller._players = {"player_1": player}
++        controller.get_active_queue = MagicMock(return_value=None)  # type: ignore[method-assign]
++
++        with pytest.raises(InvalidDataError):
++            controller.set_sleep_timer("player_1", 0, "track_end")
++
++    async def test_track_end_timer_waits_on_when_playback_was_paused(
++        self, mock_mass: MagicMock
++    ) -> None:
++        """A pause during the countdown must not stop the track early; the timer looks again."""
++        controller = PlayerController(mock_mass)
++        provider = MockProvider("test_provider", instance_id="test", mass=mock_mass)
++        player = MockPlayer(provider, "player_1", "Player 1")
++        controller._players = {"player_1": player}
++        queue = self._queue_view(controller, mock_mass, [200], elapsed=50)
++        controller.set_sleep_timer("player_1", 0, "track_end")
++        controller.cmd_stop = AsyncMock()  # type: ignore[method-assign]
++        mock_mass.call_later.reset_mock()
++        queue.corrected_elapsed_time = 120  # the pause held the music back
++
++        await controller._handle_sleep_timer_expired("player_1")
++
++        controller.cmd_stop.assert_not_awaited()
++        assert mock_mass.call_later.call_args.args[0] == pytest.approx(80)
++        assert player.sleep_timer_expires_at == pytest.approx(time.time() + 80, abs=2)
++
++    async def test_track_end_timer_stops_once_the_track_is_over(self, mock_mass: MagicMock) -> None:
++        """When the playing track has run out, the timer stops playback."""
++        controller = PlayerController(mock_mass)
++        provider = MockProvider("test_provider", instance_id="test", mass=mock_mass)
++        player = MockPlayer(provider, "player_1", "Player 1")
++        controller._players = {"player_1": player}
++        queue = self._queue_view(controller, mock_mass, [200], elapsed=50)
++        controller.set_sleep_timer("player_1", 0, "track_end")
++        controller.cmd_stop = AsyncMock()  # type: ignore[method-assign]
++        queue.corrected_elapsed_time = 199.8
++
++        await controller._handle_sleep_timer_expired("player_1")
++
++        controller.cmd_stop.assert_awaited_once_with("player_1")
++        assert player.sleep_timer_expires_at is None
++
+     async def test_sleep_timer_expiry_stops_player(self, mock_mass: MagicMock) -> None:
+         """An expired sleep timer clears its state and stops playback."""
+         controller = PlayerController(mock_mass)
+diff --git a/tests/helpers/test_sleep_boundary.py b/tests/helpers/test_sleep_boundary.py
+new file mode 100644
+index 0000000..1179803
+--- /dev/null
++++ b/tests/helpers/test_sleep_boundary.py
+@@ -0,0 +1,124 @@
++"""Tests for finding where a sleep timer should stop: at the end of a track, album or chapter."""
++
++from __future__ import annotations
++
++from types import SimpleNamespace
++
++from music_assistant.helpers.sleep_boundary import (
++    SleepItem,
++    SleepTarget,
++    pick_target,
++    seconds_until,
++    sleep_item_from,
++)
++
++
++def _tracks(*durations: float, album: str | None = "a") -> list[SleepItem]:
++    return [SleepItem(f"i{n}", d, album) for n, d in enumerate(durations)]
++
++
++def test_track_end_is_the_end_of_the_playing_track() -> None:
++    """Stopping at the end of this track means the end of the first item."""
++    items = _tracks(200, 180)
++    assert pick_target("track_end", 0, items, 50, 1.0) == SleepTarget("i0", 200)
++    assert seconds_until(SleepTarget("i0", 200), items, 50, 1.0) == 150
++
++
++def test_track_end_inside_a_book_is_the_end_of_the_chapter() -> None:
++    """An audiobook is one item; the end of the playing chapter is what counts."""
++    book = SleepItem("book", 36000, None, chapter_ends=(600, 1500, 2100))
++    assert pick_target("track_end", 0, [book], 700, 1.0) == SleepTarget("book", 1500)
++    assert seconds_until(SleepTarget("book", 1500), [book], 700, 1.0) == 800
++
++
++def test_album_end_is_the_end_of_the_last_track_of_the_same_album() -> None:
++    """The run stops where the queue leaves the album."""
++    items = [
++        SleepItem("t1", 100, "x"),
++        SleepItem("t2", 120, "x"),
++        SleepItem("t3", 140, "x"),
++        SleepItem("t4", 90, "y"),
++    ]
++    target = pick_target("album_end", 0, items, 40, 1.0)
++    assert target == SleepTarget("t3", 140)
++    assert seconds_until(target, items, 40, 1.0) == 60 + 120 + 140
++
++
++def test_album_end_needs_an_album() -> None:
++    """A radio stream or a book has no album to run to the end of."""
++    assert pick_target("album_end", 0, _tracks(100, album=None), 0, 1.0) is None
++
++
++def test_fit_takes_the_latest_track_end_inside_the_budget() -> None:
++    """Thirty minutes of four-minute tracks end after seven tracks, not at the thirty mark."""
++    items = _tracks(*[240] * 10)
++    target = pick_target("fit", 30 * 60, items, 0, 1.0)
++    assert target == SleepTarget("i6", 240)
++    assert seconds_until(target, items, 0, 1.0) == 7 * 240
++
++
++def test_fit_counts_only_what_is_left_of_the_playing_track() -> None:
++    """Time already played of the first track does not eat the budget."""
++    items = _tracks(240, 240, 240)
++    target = pick_target("fit", 500, items, 200, 1.0)
++    assert target == SleepTarget("i1", 240)
++
++
++def test_fit_stops_at_a_chapter_end_inside_a_book() -> None:
++    """With thirty minutes to spare, the book stops at the last chapter that ends in time."""
++    book = SleepItem("book", 36000, None, chapter_ends=(600, 1500, 2100, 3000))
++    target = pick_target("fit", 30 * 60, [book], 500, 1.0)
++    assert target == SleepTarget("book", 2100)
++    assert seconds_until(target, [book], 500, 1.0) == 1600
++
++
++def test_fit_gives_up_when_no_boundary_is_close_enough() -> None:
++    """A single chapter longer than the budget leaves nothing to land on."""
++    book = SleepItem("book", 36000, None, chapter_ends=(4000,))
++    assert pick_target("fit", 600, [book], 0, 1.0) is None
++
++
++def test_playback_speed_shortens_the_wait() -> None:
++    """At 2x, a chapter that has 600 seconds left ends in 300 seconds of wall time."""
++    book = SleepItem("book", 36000, None, chapter_ends=(1000,))
++    assert seconds_until(SleepTarget("book", 1000), [book], 400, 2.0) == 300
++    # and the budget buys twice the media
++    assert pick_target("fit", 300, [book], 400, 2.0) == SleepTarget("book", 1000)
++
++
++def test_a_target_that_has_gone_from_the_queue_is_unknown() -> None:
++    """A skipped or removed item cannot be waited for."""
++    assert seconds_until(SleepTarget("gone", 10), _tracks(100), 0, 1.0) is None
++
++
++def test_items_of_unknown_length_end_the_search() -> None:
++    """Nothing is known past a stream that has no duration."""
++    items = [SleepItem("t1", 100, "x"), SleepItem("t2", None, "x"), SleepItem("t3", 100, "x")]
++    assert pick_target("album_end", 0, items, 0, 1.0) == SleepTarget("t1", 100)
++
++
++def test_chapters_are_read_from_a_queue_item() -> None:
++    """Chapter ends come from the next chapter's start, or the item's duration for the last one."""
++    chapters = [
++        SimpleNamespace(start=0.0, end=None),
++        SimpleNamespace(start=600.0, end=1500.0),
++        SimpleNamespace(start=1500.0, end=None),
++    ]
++    queue_item = SimpleNamespace(
++        queue_item_id="book",
++        duration=2400,
++        media_item=SimpleNamespace(metadata=SimpleNamespace(chapters=chapters), album=None),
++    )
++    assert sleep_item_from(queue_item) == SleepItem("book", 2400, None, (600.0, 1500.0, 2400.0))
++
++
++def test_album_is_read_from_a_track() -> None:
++    """Tracks of one album share the album's URI."""
++    track = SimpleNamespace(
++        queue_item_id="t",
++        duration=100,
++        media_item=SimpleNamespace(
++            metadata=SimpleNamespace(chapters=None), album=SimpleNamespace(uri="library://album/7")
++        ),
++    )
++    assert sleep_item_from(track).album == "library://album/7"
+-- 
+2.43.0
+
