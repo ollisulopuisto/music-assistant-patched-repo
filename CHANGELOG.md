@@ -15,6 +15,8 @@ Upstream 2.10.6 (9.10.2026): `0122-preserve-dsd-stereo-downmix.patch` re-based, 
 
 Waiting for the next publish build (patches are committed, not pushed):
 
+- Sleep timer can stop at a boundary instead of after a fixed time: the end of the playing track (or chapter, in an audiobook), the end of the playing album, or "finish within" 15 to 120 minutes, which stops after the last track or chapter that ends inside that time (a 30 minute budget over four-minute tracks stops after seven). If no boundary fits the time, it is an ordinary countdown. A pause during the countdown moves the stop; the timer looks again when it fires. Server command `players/sleep_timer/set` takes a new `mode` (`duration`, `track_end`, `album_end`, `fit`); the countdown shows the expected stop. Server 0014, frontend 0010. Not tried on a device: the stop may cut up to about a second off the end of the track.
+
 - A-Z strip on the library playlists listing (Soittolistat), like artists and albums. Playlists mirrored from Spotify number in the hundreds. Not tried in a browser.
 
 - Loudness Analysis can now be disabled (Settings > Audio analysis > Loudness Analysis > Disable). It reads whole files through the media server, and the user does not use volume normalisation. Tracks that already have stored loudness keep it.
