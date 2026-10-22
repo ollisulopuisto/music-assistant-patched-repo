@@ -1,0 +1,148 @@
+From efed62574770ecfa345db31f9d42c22994799c08 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 22 Oct 2026 04:35:09 +0000
+Subject: [PATCH] Now-playing dashboard: watch the player it shows, not the
+ Cast device
+
+A dashboard showing a group or another speaker was timed against the Cast device's own
+playback, which stays idle, so it would close after the idle time while music played.
+With idle close set to 0 the dashboards no longer follow every player update.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_016bdM1DxXcha5BLMHxDaXkJ
+---
+ .../providers/chromecast/dashboard.py         | 26 +++++++++++-----
+ .../chromecast/test_dashboard_idle_wiring.py  | 31 +++++++++++++++++++
+ .../chromecast/test_dashboard_liveness.py     |  4 ++-
+ 3 files changed, 53 insertions(+), 8 deletions(-)
+
+diff --git a/music_assistant/providers/chromecast/dashboard.py b/music_assistant/providers/chromecast/dashboard.py
+index 465d6de..b8fa1c8 100644
+--- a/music_assistant/providers/chromecast/dashboard.py
++++ b/music_assistant/providers/chromecast/dashboard.py
+@@ -3,6 +3,7 @@
+ from __future__ import annotations
+ 
+ import functools
++from collections.abc import Callable
+ from dataclasses import dataclass
+ from typing import TYPE_CHECKING, cast
+ from uuid import UUID
+@@ -58,6 +59,8 @@ class _ActiveDashboardCast:
+     loss_timer: asyncio.TimerHandle | None = None
+     # which dashboard is showing; only a now-playing one is closed for idle playback
+     dashboard: DashboardType | None = None
++    # the player a now-playing dashboard shows (a group, another speaker); None means the device
++    watched_player_id: str | None = None
+ 
+ 
+ class ChromecastDashboards:
+@@ -90,8 +93,11 @@ class ChromecastDashboards:
+         self._idle_closer = IdleDashboardCloser(
+             self.mass.loop, self._idle_close_minutes * 60, self._close_idle
+         )
+-        self._unsubscribe_players = self.mass.subscribe(
+-            self._on_player_event, event_filter=EventType.PLAYER_UPDATED
++        # with idle close off nothing needs to follow every player update
++        self._unsubscribe_players: Callable[[], None] = (
++            self.mass.subscribe(self._on_player_event, event_filter=EventType.PLAYER_UPDATED)
++            if self._idle_close_minutes > 0
++            else lambda: None
+         )
+ 
+     def register(self, uuid: UUID, cast_info: CastInfo) -> None:
+@@ -202,7 +208,10 @@ class ChromecastDashboards:
+         session_id = chromecast.status.session_id if chromecast.status else None
+         listener = _DashboardCastListener(self, device_id)
+         self._active_casts[device_id] = _ActiveDashboardCast(
+-            cast_session_id=session_id, listener=listener, dashboard=dashboard
++            cast_session_id=session_id,
++            listener=listener,
++            dashboard=dashboard,
++            watched_player_id=player_id,
+         )
+         self._observe_idle(device_id)
+         chromecast.register_status_listener(cast("ReceiverStatusListener", listener))
+@@ -315,16 +324,19 @@ class ChromecastDashboards:
+             chromecast.disconnect(0)
+ 
+     def _on_player_event(self, event: MassEvent) -> None:
+-        """Re-check idle playback for a player whose device is showing a now-playing dashboard."""
+-        if event.object_id and event.object_id in self._active_casts:
+-            self._observe_idle(event.object_id)
++        """Re-check idle playback for the devices whose now-playing dashboard shows this player."""
++        if not event.object_id:
++            return
++        for device_id, entry in list(self._active_casts.items()):
++            if (entry.watched_player_id or device_id) == event.object_id:
++                self._observe_idle(device_id)
+ 
+     def _observe_idle(self, device_id: str) -> None:
+         """Tell the idle closer whether a device showing a now-playing dashboard is playing."""
+         entry = self._active_casts.get(device_id)
+         if entry is None or entry.dashboard != DashboardType.NOW_PLAYING:
+             return
+-        player = self.mass.players.get_player(device_id)
++        player = self.mass.players.get_player(entry.watched_player_id or device_id)
+         playing = player is not None and player.playback_state == PlaybackState.PLAYING
+         self._idle_closer.observe(device_id, playing=playing)
+ 
+diff --git a/tests/providers/chromecast/test_dashboard_idle_wiring.py b/tests/providers/chromecast/test_dashboard_idle_wiring.py
+index 8e3d158..61d0f04 100644
+--- a/tests/providers/chromecast/test_dashboard_idle_wiring.py
++++ b/tests/providers/chromecast/test_dashboard_idle_wiring.py
+@@ -120,3 +120,34 @@ async def test_ending_a_session_stops_timing_it() -> None:
+     )
+     dashboards._drop_active_cast(device_id)
+     closer.forget.assert_called_once_with(device_id)
++
++
++async def test_the_shown_player_is_watched_not_the_cast_device() -> None:
++    """A dashboard showing a group plays on as long as the group plays, not the Cast device."""
++    dashboards = _make_dashboards()
++    device_id = str(uuid4())
++    dashboards._active_casts[device_id] = _ActiveDashboardCast(
++        cast_session_id="s",
++        listener=MagicMock(),
++        dashboard=DashboardType.NOW_PLAYING,
++        watched_player_id="living_room_group",
++    )
++    states = {
++        device_id: PlaybackState.IDLE,
++        "living_room_group": PlaybackState.PLAYING,
++    }
++    dashboards.mass.players.get_player.side_effect = lambda pid: SimpleNamespace(
++        playback_state=states[pid]
++    )
++    closer = MagicMock()
++    dashboards._idle_closer = closer
++
++    dashboards._on_player_event(SimpleNamespace(object_id="living_room_group"))  # type: ignore[arg-type]
++
++    closer.observe.assert_called_once_with(device_id, playing=True)
++
++
++async def test_no_player_events_are_followed_when_idle_close_is_off() -> None:
++    """With idle close set to 0 the dashboards do not listen to every player update."""
++    dashboards = _make_dashboards(idle_close_minutes=0)
++    dashboards.mass.subscribe.assert_not_called()
+diff --git a/tests/providers/chromecast/test_dashboard_liveness.py b/tests/providers/chromecast/test_dashboard_liveness.py
+index 0a4b358..6e239f8 100644
+--- a/tests/providers/chromecast/test_dashboard_liveness.py
++++ b/tests/providers/chromecast/test_dashboard_liveness.py
+@@ -16,9 +16,11 @@ from music_assistant.providers.chromecast.dashboard import (
+ )
+ 
+ 
+-def _make_dashboards() -> ChromecastDashboards:
++def _make_dashboards(idle_close_minutes: int | None = None) -> ChromecastDashboards:
+     """Build a ChromecastDashboards instance with a fully mocked owning provider."""
+     provider = MagicMock()
++    if idle_close_minutes is not None:
++        provider.config.get_value.return_value = idle_close_minutes
+     provider.translation_owner = "provider.chromecast"
+     provider.domain = "chromecast"
+     provider.mass.closing = False
+-- 
+2.43.0
+

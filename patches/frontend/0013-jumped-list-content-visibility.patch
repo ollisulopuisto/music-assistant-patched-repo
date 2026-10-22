@@ -1,0 +1,47 @@
+From 9006568472636284f3f137ffa81eff1de8918918 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 22 Oct 2026 04:40:30 +0000
+Subject: [PATCH] Jumped list: skip layout and paint of rows off screen
+
+After an A-Z jump the list view leaves the virtual scroller (the start sentinel has to
+see real rows), so every loaded page stays in the document. Rows now use
+content-visibility: auto with the scroller's 70 px row height, so the browser only lays
+out and paints what is near the viewport.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_016bdM1DxXcha5BLMHxDaXkJ
+---
+ src/components/ItemsListing.vue | 10 +++++++++-
+ 1 file changed, 9 insertions(+), 1 deletion(-)
+
+diff --git a/src/components/ItemsListing.vue b/src/components/ItemsListing.vue
+index d431bc1..aa68a45 100644
+--- a/src/components/ItemsListing.vue
++++ b/src/components/ItemsListing.vue
+@@ -257,7 +257,7 @@
+         </v-virtual-scroll>
+         <!-- Keep jumped list rows in document flow so the start sentinel can observe
+              them and prepending a page has a measurable scroll height. -->
+-        <div v-else-if="viewMode == 'list'">
++        <div v-else-if="viewMode == 'list'" class="jumped-list">
+           <template
+             v-for="(item, index) in listDisplayItems"
+             :key="'isDiscHeader' in item ? `disc-${item.disc}-${index}` : item.uri"
+@@ -2562,6 +2562,14 @@ defineExpose({
+   }
+ }
+ 
++/* A jumped list keeps every page it has loaded in the document, so a long scroll leaves
++   thousands of rows behind; the browser skips laying out and painting the ones off screen.
++   The row height matches the virtual scroller's, so the scroll height stays right. */
++.jumped-list > * {
++  content-visibility: auto;
++  contain-intrinsic-size: auto 70px;
++}
++
+ .disc-header {
+   display: flex;
+   align-items: flex-end;
+-- 
+2.43.0
+

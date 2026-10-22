@@ -15,6 +15,14 @@ Upstream 2.10.6 (9.10.2026): `0122-preserve-dsd-stereo-downmix.patch` re-based, 
 
 Waiting for the next publish build (patches are committed, not pushed):
 
+- Performance pass over our own patches (server 0015-0017, frontend 0011-0013); upstream code untouched:
+  - A big playlist is read once per visit instead of once per 50-item page. For 5000 Spotify tracks each page cost about 0.2 s of server event loop plus a database read per provider page, so scrolling to the end cost about 16 s; the count sent with the first page read it once more, and a refresh fetched the playlist from Spotify twice. Items are now kept in memory for 90 s (two playlists at most), overlapping requests share one read, sorted views are built once, and editing a playlist clears what was kept.
+  - Sleep timer: paused near a track end, a boundary timer re-armed itself about twice a second and sent a player update to every client each time. Paused, it now checks back every 5 s quietly; stopped playback ends it. The queue is read only as far as the mode needs.
+  - Now-playing dashboard: idle close now watches the player the dashboard shows. A dashboard showing a group or another speaker was timed against the Cast device's own (idle) playback and would have closed mid-music. With idle close at 0 the dashboards no longer follow player updates.
+  - Now-playing dashboard: without an artist portrait the cover was loaded twice and drawn over itself; the 60 fps lyrics clock ran for every track, lyrics or not (a constant load on a Chromecast); a late lyrics answer after a skip could replace the current track's lyrics.
+  - Listings: plain-text descriptions (radio, playlist, podcast episode rows) were re-parsed through markdown, DOMPurify and a DOM parser on every row render, about a millisecond each; now kept per text.
+  - After an A-Z jump the list view keeps every loaded page in the document; off-screen rows are now skipped by the browser (`content-visibility: auto`). Not tried in a browser.
+
 - Sleep timer can stop at a boundary instead of after a fixed time: the end of the playing track (or chapter, in an audiobook), the end of the playing album, or "finish within" 15 to 120 minutes, which stops after the last track or chapter that ends inside that time (a 30 minute budget over four-minute tracks stops after seven). If no boundary fits the time, it is an ordinary countdown. A pause during the countdown moves the stop; the timer looks again when it fires. Server command `players/sleep_timer/set` takes a new `mode` (`duration`, `track_end`, `album_end`, `fit`); the countdown shows the expected stop. Server 0014, frontend 0010. Not tried on a device: the stop may cut up to about a second off the end of the track.
 
 - A-Z strip on the library playlists listing (Soittolistat), like artists and albums. Playlists mirrored from Spotify number in the hundreds. Not tried in a browser.

@@ -1,0 +1,221 @@
+From 8a87b65c01f5e6a3bd8adc215ff8232dd44a3582 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 22 Oct 2026 04:37:25 +0000
+Subject: [PATCH] Now-playing dashboard: one cover request, lyrics clock only
+ with lyrics, no stale lyrics
+
+Without an artist portrait the cover was requested twice (512 and 1024 px) and drawn on
+itself. The 60 fps lyrics clock ran for every track, lyrics or not, which a Chromecast
+pays for all day. A late lyrics answer for a skipped track replaced the current one.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_016bdM1DxXcha5BLMHxDaXkJ
+---
+ src/views/DashboardNowPlayingView.vue       | 21 +++--
+ tests/views/DashboardNowPlayingView.test.ts | 90 +++++++++++++++++++--
+ 2 files changed, 96 insertions(+), 15 deletions(-)
+
+diff --git a/src/views/DashboardNowPlayingView.vue b/src/views/DashboardNowPlayingView.vue
+index d2abe42..4cc3b63 100644
+--- a/src/views/DashboardNowPlayingView.vue
++++ b/src/views/DashboardNowPlayingView.vue
+@@ -23,7 +23,7 @@
+           <PlayerIcon :icon="store.activePlayer.icon" :size="160" />
+         </div>
+         <img
+-          v-if="coverUrl && coverUrl !== artworkUrl"
++          v-if="coverUrl"
+           :src="coverUrl"
+           :alt="$t('tooltip.artwork')"
+           class="now-playing-cover"
+@@ -140,10 +140,15 @@ const artworkUrl = computed(() =>
+   ),
+ );
+ 
+-// the album cover is kept as a small thumbnail beside the portrait when the portrait is shown big
+-const coverUrl = computed(() =>
+-  getMediaImageUrl(store.activePlayer?.current_media?.image_url),
+-);
++// the album cover is kept as a small thumbnail beside the portrait when the portrait is shown big;
++// without a portrait the big picture already is the cover, so it is not loaded a second time
++const coverUrl = computed(() => {
++  const media = store.activePlayer?.current_media;
++  const albumImage = media?.image_url ?? null;
++  if (nowPlayingArtwork(media?.custom_data, albumImage) === albumImage)
++    return null;
++  return getMediaImageUrl(albumImage);
++});
+ const albumName = computed(() => store.activePlayer?.current_media?.album);
+ 
+ // Lyrics for the track on screen, fetched once per track like the party dashboard does.
+@@ -154,8 +159,8 @@ const currentLyrics = ref<{ plain: string | null; synced: string | null }>({
+ const hasLyrics = computed(() =>
+   Boolean(currentLyrics.value.plain || currentLyrics.value.synced),
+ );
+-const lyricsEnabled = ref(true);
+-const { elapsedTime: lyricsElapsedTime } = useLyricsElapsedTime(lyricsEnabled);
++// the clock ticks every frame, so it runs only while there are lyrics to follow
++const { elapsedTime: lyricsElapsedTime } = useLyricsElapsedTime(hasLyrics);
+ 
+ const fetchLyrics = async () => {
+   currentLyrics.value = { plain: null, synced: null };
+@@ -171,6 +176,8 @@ const fetchLyrics = async () => {
+   }
+   try {
+     const [lyrics, lrcLyrics] = await api.getTrackLyrics(track);
++    // a skip while the answer was on its way: this answer belongs to an earlier track
++    if (store.curQueueItem?.media_item?.uri !== track.uri) return;
+     currentLyrics.value = { plain: lyrics, synced: lrcLyrics };
+   } catch (error) {
+     console.error("Failed to fetch track lyrics:", error);
+diff --git a/tests/views/DashboardNowPlayingView.test.ts b/tests/views/DashboardNowPlayingView.test.ts
+index 86bd294..64a53b6 100644
+--- a/tests/views/DashboardNowPlayingView.test.ts
++++ b/tests/views/DashboardNowPlayingView.test.ts
+@@ -1,10 +1,15 @@
+ import DashboardNowPlayingView from "@/views/DashboardNowPlayingView.vue";
+-import { mount } from "@vue/test-utils";
+-import { beforeEach, describe, expect, it, vi } from "vitest";
++import { enableAutoUnmount, flushPromises, mount } from "@vue/test-utils";
++import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+ 
+-const { routeMock, storeMock } = vi.hoisted(() => ({
++const { routeMock, storeMock, lyricsClock, apiMock } = vi.hoisted(() => ({
+   routeMock: { query: {} as Record<string, string> },
++  lyricsClock: { enabled: undefined as { value: boolean } | undefined },
++  apiMock: { baseUrl: "", getTrackLyrics: vi.fn() },
+   storeMock: {
++    curQueueItem: undefined as
++      | { media_item: { uri: string; media_type: string; metadata: object } }
++      | undefined,
+     activePlayerId: undefined as string | undefined,
+     activePlayer: undefined as
+       | {
+@@ -15,6 +20,7 @@ const { routeMock, storeMock } = vi.hoisted(() => ({
+             title?: string;
+             artist?: string;
+             image_url?: string;
++            custom_data?: Record<string, unknown>;
+           };
+         }
+       | undefined,
+@@ -22,12 +28,13 @@ const { routeMock, storeMock } = vi.hoisted(() => ({
+ }));
+ 
+ vi.mock("@/plugins/api", () => ({
+-  default: { baseUrl: "" },
++  default: apiMock,
+ }));
+ 
+-vi.mock("@/plugins/store", () => ({
+-  store: storeMock,
+-}));
++vi.mock("@/plugins/store", async () => {
++  const { reactive } = await import("vue");
++  return { store: reactive(storeMock) };
++});
+ 
+ vi.mock("vue-router", () => ({
+   useRoute: () => routeMock,
+@@ -49,7 +56,12 @@ vi.mock("@/plugins/i18n", () => ({
+ // The lyrics clock reads the queue API, which this test does not stub; the lyrics path has its own tests.
+ vi.mock("@/composables/lyrics/useLyricsElapsedTime", async () => {
+   const { ref } = await import("vue");
+-  return { useLyricsElapsedTime: () => ({ elapsedTime: ref(0) }) };
++  return {
++    useLyricsElapsedTime: (enabled: { value: boolean }) => {
++      lyricsClock.enabled = enabled;
++      return { elapsedTime: ref(0) };
++    },
++  };
+ });
+ 
+ vi.mock("@vueuse/core", () => ({
+@@ -62,17 +74,23 @@ function mountView() {
+     global: {
+       stubs: {
+         PlayerTimeline: true,
++        LyricsViewer: true,
+         MarqueeText: { template: "<span><slot /></span>" },
+       },
+     },
+   });
+ }
+ 
++// views left mounted keep watching the store and would answer later tests' lyrics requests
++enableAutoUnmount(afterEach);
++
+ describe("DashboardNowPlayingView", () => {
+   beforeEach(() => {
+     routeMock.query = {};
+     storeMock.activePlayerId = undefined;
+     storeMock.activePlayer = undefined;
++    storeMock.curQueueItem = undefined;
++    apiMock.getTrackLyrics.mockReset();
+   });
+ 
+   it("pins the active player from the player query param on mount", () => {
+@@ -116,4 +134,60 @@ describe("DashboardNowPlayingView", () => {
+     expect(wrapper.text()).toContain("Kitchen");
+     expect(wrapper.text()).not.toContain("Song Title");
+   });
++
++  it("loads the album cover once when there is no artist portrait", () => {
++    storeMock.activePlayer = {
++      name: "Kitchen",
++      powered: true,
++      current_media: {
++        title: "Song",
++        image_url: "http://ma/imageproxy?path=x&provider=p&size=512",
++      },
++    };
++    const wrapper = mountView();
++    expect(wrapper.findAll("img")).toHaveLength(1);
++  });
++
++  it("shows the cover beside the artist portrait", () => {
++    storeMock.activePlayer = {
++      name: "Kitchen",
++      powered: true,
++      current_media: {
++        title: "Song",
++        image_url: "http://ma/imageproxy?path=x&provider=p&size=512",
++        custom_data: { artist_image_url: "http://ma/artist.jpg" },
++      },
++    };
++    const wrapper = mountView();
++    expect(wrapper.findAll("img")).toHaveLength(2);
++  });
++
++  it("runs the lyrics clock only while there are lyrics to follow", () => {
++    storeMock.activePlayer = { name: "Kitchen", powered: true };
++    mountView();
++    expect(lyricsClock.enabled?.value).toBe(false);
++  });
++
++  it("keeps the lyrics of the track on screen when an older answer arrives late", async () => {
++    storeMock.activePlayer = { name: "Kitchen", powered: true };
++    const answers: Array<(value: [string, null]) => void> = [];
++    apiMock.getTrackLyrics.mockImplementation(
++      () => new Promise((resolve) => answers.push(resolve)),
++    );
++    const track = (uri: string) => ({
++      media_item: { uri, media_type: "track", metadata: {} },
++    });
++    storeMock.curQueueItem = track("a");
++    const wrapper = mountView();
++    const { store } = await import("@/plugins/store");
++    (store as typeof storeMock).curQueueItem = track("b");
++    await flushPromises();
++    answers[1](["lyrics of b", null]);
++    await flushPromises();
++    answers[0](["lyrics of a", null]);
++    await flushPromises();
++    expect(
++      wrapper.findComponent({ name: "LyricsViewer" }).props("lyrics"),
++    ).toBe("lyrics of b");
++  });
+ });
+-- 
+2.43.0
+
