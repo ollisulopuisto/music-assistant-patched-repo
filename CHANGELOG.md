@@ -15,6 +15,8 @@ Upstream 2.10.6 (9.10.2026): `0122-preserve-dsd-stereo-downmix.patch` re-based, 
 
 Waiting for the next publish build (patches are committed, not pushed):
 
+- Multichannel changes (0120) broke 19 upstream stream tests on 2.10.7: `arriving_audio_format` assumed every stream record has `decoded_audio_format`, and a record that is not a full `StreamDetails` raised `AttributeError` in the flow format and restart checks. It now falls back to the claimed format (server 0124). Two `test_audio_analysis` tests still fail with 0120 (they hand the analysis worker a mock buffer whose `pcm_format` cannot be compared); `test_filtergraph_complex_runs_in_ffmpeg` fails without our patches too (the local FFmpeg lacks `afir irnorm`).
+
 - Performance pass over our own patches (server 0015-0017, frontend 0011-0013); upstream code untouched:
   - A big playlist is read once per visit instead of once per 50-item page. For 5000 Spotify tracks each page cost about 0.2 s of server event loop plus a database read per provider page, so scrolling to the end cost about 16 s; the count sent with the first page read it once more, and a refresh fetched the playlist from Spotify twice. Items are now kept in memory for 90 s (two playlists at most), overlapping requests share one read, sorted views are built once, and editing a playlist clears what was kept.
   - Sleep timer: paused near a track end, a boundary timer re-armed itself about twice a second and sent a player update to every client each time. Paused, it now checks back every 5 s quietly; stopped playback ends it. The queue is read only as far as the mode needs.
