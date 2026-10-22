@@ -1,0 +1,579 @@
+From ba26929ae03bc2f7c9dc0e795fc14d79bdfe534c Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 22 Oct 2026 04:35:09 +0000
+Subject: [PATCH] Read a big playlist once per visit, not once per page
+
+Each playlist_tracks_page request read and deserialised the whole playlist from the
+provider cache (about 0.2 s of event loop per page for 5000 tracks, plus a DB read per
+provider page), and the count sent with the first page read it once more. A refresh
+fetched the playlist from the provider twice in parallel. Items are now kept in memory
+for 90 s (two playlists at most), overlapping requests share one read, sorted and
+filtered views are built once, and a playlist edit clears what was kept.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_016bdM1DxXcha5BLMHxDaXkJ
+---
+ .../controllers/music/media/playlists.py      |  77 ++++++----
+ .../helpers/playlist_items_cache.py           | 133 ++++++++++++++++
+ music_assistant/helpers/playlist_page.py      |  28 +++-
+ .../music/test_playlist_tracks_page.py        |  34 ++++-
+ tests/helpers/test_playlist_items_cache.py    | 142 ++++++++++++++++++
+ 5 files changed, 377 insertions(+), 37 deletions(-)
+ create mode 100644 music_assistant/helpers/playlist_items_cache.py
+ create mode 100644 tests/helpers/test_playlist_items_cache.py
+
+diff --git a/music_assistant/controllers/music/media/playlists.py b/music_assistant/controllers/music/media/playlists.py
+index db7c2d6..bfec801 100644
+--- a/music_assistant/controllers/music/media/playlists.py
++++ b/music_assistant/controllers/music/media/playlists.py
+@@ -2,7 +2,7 @@
+ 
+ from __future__ import annotations
+ 
+-from collections.abc import AsyncGenerator, Sequence
++from collections.abc import AsyncGenerator, Awaitable, Callable, Sequence
+ from contextlib import suppress
+ from typing import TYPE_CHECKING, Any, cast
+ 
+@@ -25,7 +25,8 @@ from music_assistant.controllers.tasks.context import (
+ from music_assistant.controllers.webserver.helpers.auth_middleware import get_current_user
+ from music_assistant.helpers.database import UNSET
+ from music_assistant.helpers.json import json_loads, serialize_to_json
+-from music_assistant.helpers.playlist_page import page_playlist_items, wants_early_stop
++from music_assistant.helpers.playlist_items_cache import PlaylistItemsCache
++from music_assistant.helpers.playlist_page import order_playlist_items, wants_early_stop
+ from music_assistant.helpers.playlists import (
+     PlaylistItem,
+     generate_m3u,
+@@ -76,6 +77,8 @@ class PlaylistController(MediaControllerBase[Playlist]):
+     def __init__(self, mass: MusicAssistant) -> None:
+         """Initialize class."""
+         super().__init__(mass)
++        # the items of the playlist being browsed, so its pages and count share one read
++        self._items_cache: PlaylistItemsCache[PlaylistPlayableItem] = PlaylistItemsCache()
+         # register (extra) api handlers
+         api_base = self.api_base
+         self.mass.register_api_command(
+@@ -201,21 +204,21 @@ class PlaylistController(MediaControllerBase[Playlist]):
+         """
+         if limit < 1 or offset < 0:
+             raise InvalidDataError("limit must be at least 1 and offset cannot be negative")
+-        early_stop = wants_early_stop(order_by, search, starts_from, starts_before)
+-        stream = self.tracks(item_id, provider_instance_id_or_domain, force_refresh=force_refresh)
+-        items: list[PlaylistPlayableItem] = []
+-        try:
+-            async for item in stream:
+-                items.append(item)
+-                if early_stop and len(items) >= offset + limit:
+-                    break
+-        finally:
+-            await stream.aclose()
+-        if early_stop:
+-            return items[offset : offset + limit]
+-        return page_playlist_items(
+-            items, order_by, search, offset, limit, starts_from, starts_before
+-        )
++        key = (provider_instance_id_or_domain, item_id)
++        load = self._playlist_items_loader(item_id, provider_instance_id_or_domain, force_refresh)
++        if wants_early_stop(order_by, search, starts_from, starts_before):
++            items = await self._items_cache.items(key, load, force_refresh)
++        else:
++            items = await self._items_cache.view(
++                key,
++                load,
++                force_refresh,
++                (order_by, search or "", starts_from or "", starts_before or ""),
++                lambda all_items: order_playlist_items(
++                    all_items, order_by, search, starts_from, starts_before
++                ),
++            )
++        return items[offset : offset + limit]
+ 
+     async def tracks_count(
+         self,
+@@ -233,14 +236,32 @@ class PlaylistController(MediaControllerBase[Playlist]):
+         :param provider_instance_id_or_domain: Provider instance ID or domain.
+         :param force_refresh: Bypass cached playlist contents.
+         """
+-        count = 0
+-        stream = self.tracks(item_id, provider_instance_id_or_domain, force_refresh=force_refresh)
++        key = (provider_instance_id_or_domain, item_id)
++        load = self._playlist_items_loader(item_id, provider_instance_id_or_domain, force_refresh)
++        return len(await self._items_cache.items(key, load, force_refresh))
++
++    def _playlist_items_loader(
++        self, item_id: str, provider_instance_id_or_domain: str, force_refresh: bool
++    ) -> Callable[[], Awaitable[list[PlaylistPlayableItem]]]:
++        """Return a function that reads every item of a provider playlist."""
++
++        async def load() -> list[PlaylistPlayableItem]:
++            stream = self.tracks(
++                item_id, provider_instance_id_or_domain, force_refresh=force_refresh
++            )
++            try:
++                return [item async for item in stream]
++            finally:
++                await stream.aclose()
++
++        return load
++
++    async def _then_forget_items(self, edit: Awaitable[None]) -> None:
++        """Run a playlist edit, then drop the kept playlist items so the edit shows."""
+         try:
+-            async for _ in stream:
+-                count += 1
++            await edit
+         finally:
+-            await stream.aclose()
+-        return count
++            self._items_cache.clear()
+ 
+     async def create_playlist(
+         self,
+@@ -325,7 +346,9 @@ class PlaylistController(MediaControllerBase[Playlist]):
+         user = get_current_user()
+         return self.mass.tasks.run_background_task(
+             name=f"Add items to playlist {playlist_name}",
+-            handler=lambda: self._handle_add_playlist_tracks(db_playlist_id, uris),
++            handler=lambda: self._then_forget_items(
++                self._handle_add_playlist_tracks(db_playlist_id, uris)
++            ),
+             translation_key="add_playlist_tracks",
+             translation_owner=self.translation_owner,
+             translation_args=[playlist_name],
+@@ -342,7 +365,7 @@ class PlaylistController(MediaControllerBase[Playlist]):
+ 
+     async def add_playlist_track(self, db_playlist_id: str | int, track_uri: str) -> None:
+         """Add (single) track to playlist."""
+-        await self._handle_add_playlist_tracks(db_playlist_id, [track_uri])
++        await self._then_forget_items(self._handle_add_playlist_tracks(db_playlist_id, [track_uri]))
+ 
+     async def remove_playlist_tracks(
+         self, db_playlist_id: str | int, positions_to_remove: tuple[int, ...]
+@@ -360,8 +383,8 @@ class PlaylistController(MediaControllerBase[Playlist]):
+         user = get_current_user()
+         return self.mass.tasks.run_background_task(
+             name=f"Remove items from playlist {playlist_name}",
+-            handler=lambda: self._handle_remove_playlist_tracks(
+-                db_playlist_id, positions_to_remove
++            handler=lambda: self._then_forget_items(
++                self._handle_remove_playlist_tracks(db_playlist_id, positions_to_remove)
+             ),
+             translation_key="remove_playlist_tracks",
+             translation_owner=self.translation_owner,
+diff --git a/music_assistant/helpers/playlist_items_cache.py b/music_assistant/helpers/playlist_items_cache.py
+new file mode 100644
+index 0000000..0672eb2
+--- /dev/null
++++ b/music_assistant/helpers/playlist_items_cache.py
+@@ -0,0 +1,133 @@
++"""
++A short-lived, in-memory copy of a playlist's items, so a big playlist is read once per visit.
++
++Paging through a 5000-item playlist in pages of 50 would otherwise read (and deserialise) the
++whole playlist from the provider cache for every page, and the count that is requested with the
++first page would read it once more.
++"""
++
++from __future__ import annotations
++
++import asyncio
++import time
++from collections import OrderedDict
++from collections.abc import Awaitable, Callable, Hashable
++from dataclasses import dataclass, field
++
++# how long a playlist's items are kept, in seconds; short, so edits made elsewhere show up soon
++DEFAULT_TTL = 90.0
++# how many playlists are kept at once; a client looks at one at a time
++DEFAULT_MAX_ENTRIES = 2
++# how many sorted or filtered views of one playlist are kept
++MAX_VIEWS = 8
++
++
++@dataclass
++class _Entry[T]:
++    items: list[T]
++    loaded_at: float
++    views: OrderedDict[Hashable, list[T]] = field(default_factory=OrderedDict)
++
++
++class PlaylistItemsCache[T]:
++    """Keep the items of the most recently read playlists for a short while."""
++
++    def __init__(
++        self,
++        ttl: float = DEFAULT_TTL,
++        max_entries: int = DEFAULT_MAX_ENTRIES,
++        clock: Callable[[], float] = time.monotonic,
++    ) -> None:
++        """
++        Initialize the cache.
++
++        :param ttl: Seconds an entry stays valid.
++        :param max_entries: Number of playlists kept at once.
++        :param clock: Monotonic time source.
++        """
++        self._ttl = ttl
++        self._max_entries = max_entries
++        self._clock = clock
++        self._entries: OrderedDict[Hashable, _Entry[T]] = OrderedDict()
++        # loads in progress, keyed by (playlist key, refresh) so overlapping requests share one
++        self._loading: dict[tuple[Hashable, bool], asyncio.Future[list[T]]] = {}
++
++    async def items(
++        self, key: Hashable, load: Callable[[], Awaitable[list[T]]], refresh: bool
++    ) -> list[T]:
++        """
++        Return the playlist's items, loading them if they are not kept or a refresh is asked.
++
++        :param key: Identifies the playlist.
++        :param load: Reads every item of the playlist.
++        :param refresh: Skip the kept copy (a refresh joins a refresh already in progress).
++        """
++        return (await self._entry(key, load, refresh)).items
++
++    async def view(
++        self,
++        key: Hashable,
++        load: Callable[[], Awaitable[list[T]]],
++        refresh: bool,
++        view_key: Hashable,
++        build: Callable[[list[T]], list[T]],
++    ) -> list[T]:
++        """
++        Return a sorted or filtered view of the playlist's items, building it once.
++
++        :param key: Identifies the playlist.
++        :param load: Reads every item of the playlist.
++        :param refresh: Skip the kept copy.
++        :param view_key: Identifies the view (order, search, letter bounds).
++        :param build: Makes the view from the items.
++        """
++        entry = await self._entry(key, load, refresh)
++        if (view := entry.views.get(view_key)) is not None:
++            entry.views.move_to_end(view_key)
++            return view
++        view = build(entry.items)
++        entry.views[view_key] = view
++        while len(entry.views) > MAX_VIEWS:
++            entry.views.popitem(last=False)
++        return view
++
++    def clear(self) -> None:
++        """Forget every kept playlist, after one of them was edited."""
++        self._entries.clear()
++
++    async def _entry(
++        self, key: Hashable, load: Callable[[], Awaitable[list[T]]], refresh: bool
++    ) -> _Entry[T]:
++        if not refresh and (entry := self._entries.get(key)) is not None:
++            if self._clock() - entry.loaded_at <= self._ttl:
++                self._entries.move_to_end(key)
++                return entry
++            del self._entries[key]
++        flight = (key, refresh)
++        future = self._loading.get(flight)
++        if future is None:
++            future = asyncio.ensure_future(self._load(key, load, flight))
++            self._loading[flight] = future
++        # shielded: one caller going away must not cancel the read the others wait for
++        await asyncio.shield(future)
++        entry = self._entries.get(key)
++        if entry is None:
++            # dropped between the load and here (a clear, or many other playlists)
++            entry = _Entry(future.result(), self._clock())
++        return entry
++
++    async def _load(
++        self,
++        key: Hashable,
++        load: Callable[[], Awaitable[list[T]]],
++        flight: tuple[Hashable, bool],
++    ) -> list[T]:
++        try:
++            items = await load()
++        finally:
++            self._loading.pop(flight, None)
++        self._entries[key] = _Entry(items, self._clock())
++        self._entries.move_to_end(key)
++        while len(self._entries) > self._max_entries:
++            self._entries.popitem(last=False)
++        return items
+diff --git a/music_assistant/helpers/playlist_page.py b/music_assistant/helpers/playlist_page.py
+index 9caf113..44b7e75 100644
+--- a/music_assistant/helpers/playlist_page.py
++++ b/music_assistant/helpers/playlist_page.py
+@@ -104,17 +104,15 @@ def _matches(item: Any, needle: str) -> bool:
+     return bool(artists) and needle in (getattr(artists[0], "name", None) or "").casefold()
+ 
+ 
+-def page_playlist_items[T](
++def order_playlist_items[T](
+     items: Sequence[T],
+     order_by: str,
+     search: str | None,
+-    offset: int,
+-    limit: int,
+     starts_from: str | None = None,
+     starts_before: str | None = None,
+ ) -> list[T]:
+     """
+-    Return one page of playlist items, filtered by search and sorted by order_by.
++    Return the playlist items filtered by search and letter bounds, sorted by order_by.
+ 
+     :param starts_from: Keep items filed from this letter onwards (an A-Z jump).
+     :param starts_before: Keep items filed before this letter; with the order reversed this
+@@ -133,4 +131,24 @@ def page_playlist_items[T](
+     if order_by in _ORDERS:
+         key, reverse = _ORDERS[order_by]
+         result.sort(key=key, reverse=reverse)
+-    return result[offset : offset + limit]
++    return result
++
++
++def page_playlist_items[T](
++    items: Sequence[T],
++    order_by: str,
++    search: str | None,
++    offset: int,
++    limit: int,
++    starts_from: str | None = None,
++    starts_before: str | None = None,
++) -> list[T]:
++    """
++    Return one page of playlist items, filtered by search and sorted by order_by.
++
++    :param starts_from: Keep items filed from this letter onwards (an A-Z jump).
++    :param starts_before: Keep items filed before this letter; with the order reversed this
++        is the page above a jump, nearest first.
++    """
++    ordered = order_playlist_items(items, order_by, search, starts_from, starts_before)
++    return ordered[offset : offset + limit]
+diff --git a/tests/controllers/music/test_playlist_tracks_page.py b/tests/controllers/music/test_playlist_tracks_page.py
+index 99c9fc8..31875ea 100644
+--- a/tests/controllers/music/test_playlist_tracks_page.py
++++ b/tests/controllers/music/test_playlist_tracks_page.py
+@@ -1,8 +1,8 @@
+ """
+ Tests for the paged playlist contents command.
+ 
+-The command must stop reading the provider as soon as a provider-ordered page is full,
+-read everything for any other order or a search, and reject nonsense paging arguments.
++A playlist is read once per visit: its pages, in any order, and its count are served from
++that one read. Nonsense paging arguments are rejected.
+ """
+ 
+ from __future__ import annotations
+@@ -14,6 +14,7 @@ import pytest
+ from music_assistant_models.errors import InvalidDataError
+ 
+ from music_assistant.controllers.music.media.playlists import PlaylistController
++from music_assistant.helpers.playlist_items_cache import PlaylistItemsCache
+ 
+ pytestmark = pytest.mark.asyncio
+ 
+@@ -21,10 +22,13 @@ pytestmark = pytest.mark.asyncio
+ class _Source:
+     """A stand-in for the controller: yields numbered tracks and records how far it was read."""
+ 
++    _playlist_items_loader = PlaylistController._playlist_items_loader
++
+     def __init__(self, count: int) -> None:
+         self.count = count
+         self.read = 0
+         self.closed = False
++        self._items_cache: PlaylistItemsCache[SimpleNamespace] = PlaylistItemsCache()
+ 
+     async def tracks(self, *_args: object, **_kwargs: object) -> AsyncGenerator[SimpleNamespace]:
+         try:
+@@ -46,15 +50,35 @@ async def _page(src: _Source, **kwargs: object) -> list[SimpleNamespace]:
+     return await PlaylistController.tracks_page(src, "pl", "spotify", **kwargs)  # type: ignore[arg-type]
+ 
+ 
+-async def test_provider_order_page_reads_only_what_it_needs() -> None:
+-    """Provider order page reads only what it needs."""
++async def test_paging_reads_the_playlist_once() -> None:
++    """Scrolling through a playlist page by page reads it once, not once per page."""
+     src = _Source(1000)
+     page = await _page(src, limit=50, offset=100)
+     assert [t.position for t in page] == list(range(100, 150))
+-    assert src.read == 150
++    page = await _page(src, limit=50, offset=150)
++    assert [t.position for t in page] == list(range(150, 200))
++    assert await PlaylistController.tracks_count(src, "pl", "spotify") == 1000  # type: ignore[arg-type]
++    assert src.read == 1000
+     assert src.closed
+ 
+ 
++async def test_sorted_pages_are_read_once_too() -> None:
++    """A sorted view is built once and sliced for every following page."""
++    src = _Source(300)
++    first = await _page(src, limit=5, offset=0, order_by="duration")
++    second = await _page(src, limit=5, offset=5, order_by="duration")
++    assert [t.name for t in first + second] == [f"t{n}" for n in range(299, 289, -1)]
++    assert src.read == 300
++
++
++async def test_refresh_reads_again() -> None:
++    """A refresh skips what was kept."""
++    src = _Source(10)
++    await _page(src, limit=5)
++    await _page(src, limit=5, force_refresh=True)
++    assert src.read == 20
++
++
+ async def test_other_orders_read_everything() -> None:
+     """Other orders read everything."""
+     src = _Source(300)
+diff --git a/tests/helpers/test_playlist_items_cache.py b/tests/helpers/test_playlist_items_cache.py
+new file mode 100644
+index 0000000..868c964
+--- /dev/null
++++ b/tests/helpers/test_playlist_items_cache.py
+@@ -0,0 +1,142 @@
++"""Tests for the short-lived cache that serves a big playlist's pages from one read."""
++
++from __future__ import annotations
++
++import asyncio
++
++import pytest
++
++from music_assistant.helpers.playlist_items_cache import PlaylistItemsCache
++
++pytestmark = pytest.mark.asyncio
++
++
++class _Loader:
++    """Counts loads; optionally waits on an event so loads can overlap."""
++
++    def __init__(self, items: list[int], gate: asyncio.Event | None = None) -> None:
++        self.items = items
++        self.gate = gate
++        self.calls = 0
++
++    async def __call__(self) -> list[int]:
++        self.calls += 1
++        if self.gate is not None:
++            await self.gate.wait()
++        return list(self.items)
++
++
++class _Clock:
++    def __init__(self) -> None:
++        self.now = 0.0
++
++    def __call__(self) -> float:
++        return self.now
++
++
++async def test_second_read_comes_from_memory() -> None:
++    """Paging through a playlist reads the provider once, not once per page."""
++    cache: PlaylistItemsCache[int] = PlaylistItemsCache()
++    load = _Loader([1, 2, 3])
++    assert await cache.items("pl", load, refresh=False) == [1, 2, 3]
++    assert await cache.items("pl", load, refresh=False) == [1, 2, 3]
++    assert load.calls == 1
++
++
++async def test_overlapping_reads_share_one_load() -> None:
++    """The count and the first page arrive together; they must share one provider read."""
++    cache: PlaylistItemsCache[int] = PlaylistItemsCache()
++    gate = asyncio.Event()
++    load = _Loader([1, 2], gate)
++    first = asyncio.ensure_future(cache.items("pl", load, refresh=True))
++    second = asyncio.ensure_future(cache.items("pl", load, refresh=True))
++    await asyncio.sleep(0)
++    gate.set()
++    assert await first == [1, 2]
++    assert await second == [1, 2]
++    assert load.calls == 1
++
++
++async def test_refresh_reads_again() -> None:
++    """A refresh does not get the remembered copy."""
++    cache: PlaylistItemsCache[int] = PlaylistItemsCache()
++    load = _Loader([1])
++    await cache.items("pl", load, refresh=False)
++    load.items = [1, 2]
++    assert await cache.items("pl", load, refresh=True) == [1, 2]
++    assert load.calls == 2
++
++
++async def test_entries_expire() -> None:
++    """After the time to live the playlist is read again, so edits elsewhere show up."""
++    clock = _Clock()
++    cache: PlaylistItemsCache[int] = PlaylistItemsCache(ttl=60, clock=clock)
++    load = _Loader([1])
++    await cache.items("pl", load, refresh=False)
++    clock.now = 61
++    await cache.items("pl", load, refresh=False)
++    assert load.calls == 2
++
++
++async def test_only_a_few_playlists_are_kept() -> None:
++    """Memory stays bounded: the least recently used playlist is dropped."""
++    cache: PlaylistItemsCache[int] = PlaylistItemsCache(max_entries=2)
++    loads = {key: _Loader([n]) for n, key in enumerate("abc")}
++    for key in "abc":
++        await cache.items(key, loads[key], refresh=False)
++    await cache.items("a", loads["a"], refresh=False)
++    assert loads["a"].calls == 2
++    await cache.items("c", loads["c"], refresh=False)
++    assert loads["c"].calls == 1
++
++
++async def test_a_failed_load_is_not_remembered() -> None:
++    """An error reaches the caller, and the next read tries again."""
++    cache: PlaylistItemsCache[int] = PlaylistItemsCache()
++
++    async def broken() -> list[int]:
++        raise RuntimeError("provider down")
++
++    with pytest.raises(RuntimeError):
++        await cache.items("pl", broken, refresh=False)
++    assert await cache.items("pl", _Loader([5]), refresh=False) == [5]
++
++
++async def test_views_are_built_once_per_order() -> None:
++    """A sorted or filtered view is computed once and then sliced for every page."""
++    cache: PlaylistItemsCache[int] = PlaylistItemsCache()
++    load = _Loader([3, 1, 2])
++    builds = 0
++
++    def build(items: list[int]) -> list[int]:
++        nonlocal builds
++        builds += 1
++        return sorted(items)
++
++    assert await cache.view("pl", load, False, ("name",), build) == [1, 2, 3]
++    assert await cache.view("pl", load, False, ("name",), build) == [1, 2, 3]
++    assert builds == 1
++
++
++async def test_clear_forgets_everything() -> None:
++    """An edit to a playlist clears what was remembered."""
++    cache: PlaylistItemsCache[int] = PlaylistItemsCache()
++    load = _Loader([1])
++    await cache.items("pl", load, refresh=False)
++    cache.clear()
++    await cache.items("pl", load, refresh=False)
++    assert load.calls == 2
++
++
++async def test_a_cancelled_caller_does_not_cancel_the_shared_load() -> None:
++    """One client going away must not break the read another client is waiting for."""
++    cache: PlaylistItemsCache[int] = PlaylistItemsCache()
++    gate = asyncio.Event()
++    load = _Loader([7], gate)
++    first = asyncio.ensure_future(cache.items("pl", load, refresh=False))
++    second = asyncio.ensure_future(cache.items("pl", load, refresh=False))
++    await asyncio.sleep(0)
++    first.cancel()
++    gate.set()
++    assert await second == [7]
++    assert load.calls == 1
+-- 
+2.43.0
+

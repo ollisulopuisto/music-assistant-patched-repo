@@ -1,0 +1,70 @@
+From 40ad1a0774e32b8ed30091735963e47c0e933180 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 22 Oct 2026 04:38:00 +0000
+Subject: [PATCH] Keep plain-text descriptions instead of re-parsing them on
+ every row render
+
+Listing rows turn each radio, playlist and episode description into plain text in the
+template, which re-ran markdown, DOMPurify and a DOM parse (about a millisecond) every
+time a row rendered while scrolling. Results are now kept per text, 500 at most.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_016bdM1DxXcha5BLMHxDaXkJ
+---
+ src/helpers/utils.ts           | 17 +++++++++++++++++
+ tests/helpers/markdown.test.ts |  9 +++++++++
+ 2 files changed, 26 insertions(+)
+
+diff --git a/src/helpers/utils.ts b/src/helpers/utils.ts
+index d706e10..3883036 100644
+--- a/src/helpers/utils.ts
++++ b/src/helpers/utils.ts
+@@ -709,8 +709,25 @@ export const markdownToHtml = function (text: string): string {
+  *
+  * @param text - Markdown or HTML source.
+  */
++// listing rows render their description on every pass (scrolling, play state), and
++// the parse below costs about a millisecond, so results are kept per text
++const PLAIN_TEXT_CACHE_SIZE = 500;
++const plainTextCache = new Map<string, string>();
++
+ export const markdownToPlainText = function (text: string): string {
+   if (!text) return "";
++  const cached = plainTextCache.get(text);
++  if (cached !== undefined) return cached;
++  const plain = markdownToPlainTextUncached(text);
++  if (plainTextCache.size >= PLAIN_TEXT_CACHE_SIZE) {
++    // a Map iterates in insertion order: drop the oldest
++    plainTextCache.delete(plainTextCache.keys().next().value as string);
++  }
++  plainTextCache.set(text, plain);
++  return plain;
++};
++
++const markdownToPlainTextUncached = function (text: string): string {
+   // parsed detached and never inserted, so nothing here runs; going through
+   // markdownToHtml first keeps one sanitiser in front of all feed-supplied markup
+   const parsed = new DOMParser().parseFromString(
+diff --git a/tests/helpers/markdown.test.ts b/tests/helpers/markdown.test.ts
+index 46e6045..2c36a1e 100644
+--- a/tests/helpers/markdown.test.ts
++++ b/tests/helpers/markdown.test.ts
+@@ -85,6 +85,15 @@ describe("markdownToHtml", () => {
+ });
+ 
+ describe("markdownToPlainText", () => {
++  it("parses a description once, however often a row renders it", () => {
++    const text = "Show notes that render on every scroll, unique 7f3a";
++    const first = markdownToPlainText(text);
++    const parse = vi.spyOn(DOMParser.prototype, "parseFromString");
++    expect(markdownToPlainText(text)).toBe(first);
++    expect(parse).not.toHaveBeenCalled();
++    parse.mockRestore();
++  });
++
+   it("drops the markup a podcast feed wraps its show notes in", () => {
+     expect(
+       markdownToPlainText('<p dir="ltr">Just hours after we dropped it</p>'),
+-- 
+2.43.0
+
