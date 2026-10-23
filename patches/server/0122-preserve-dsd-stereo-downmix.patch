@@ -1,9 +1,10 @@
 Subject: [PATCH] Preserve direct DSD stereo downmix gain
+
 diff --git a/music_assistant/controllers/streams/audio_analysis.py b/music_assistant/controllers/streams/audio_analysis.py
-index 4230e48..8ee8713 100644
+index 4a750ea15..092a2f452 100644
 --- a/music_assistant/controllers/streams/audio_analysis.py
 +++ b/music_assistant/controllers/streams/audio_analysis.py
-@@ -1546,6 +1546,7 @@ class AudioAnalysisController:
+@@ -1549,6 +1549,7 @@ class AudioAnalysisController:
                      audio_input=_iter_input_chunks(),
                      input_format=input_format,
                      output_format=analysis_format,
@@ -12,10 +13,10 @@ index 4230e48..8ee8713 100644
                      pending.extend(chunk)
                      while len(pending) >= pcm_bytes_per_second:
 diff --git a/music_assistant/controllers/streams/audio_buffer.py b/music_assistant/controllers/streams/audio_buffer.py
-index 9894aff..e7da3ff 100644
+index ce2fc2d0b..eb7a35134 100644
 --- a/music_assistant/controllers/streams/audio_buffer.py
 +++ b/music_assistant/controllers/streams/audio_buffer.py
-@@ -91,6 +91,7 @@ class AudioBuffer:
+@@ -92,6 +92,7 @@ class AudioBuffer:
          mode: BufferMode = BufferMode.SEEKABLE,
          ready_threshold: int = 1,
          is_realtime: bool = False,
@@ -23,7 +24,7 @@ index 9894aff..e7da3ff 100644
      ) -> None:
          """
          Initialize AudioBuffer.
-@@ -100,9 +101,12 @@ class AudioBuffer:
+@@ -101,9 +102,12 @@ class AudioBuffer:
          :param mode: Buffer mode (SEEKABLE for tracks, ROLLING for radio).
          :param ready_threshold: Seconds of audio to buffer before signaling ready.
          :param is_realtime: Whether the source hands its audio over at playback pace.
@@ -36,7 +37,7 @@ index 9894aff..e7da3ff 100644
          configured_max_size = (
              RADIO_BUFFER_SIZE if mode == BufferMode.ROLLING else BUFFER_SIZE_MAP[buffer_size]
          )
-@@ -320,6 +324,7 @@ class AudioBuffer:
+@@ -321,6 +325,7 @@ class AudioBuffer:
              input_format=self.pcm_format,
              output_format=output_format,
              filter_params=filter_params,
@@ -44,7 +45,7 @@ index 9894aff..e7da3ff 100644
          ):
              yield chunk
  
-@@ -888,6 +893,10 @@ def _new_buffer(
+@@ -889,6 +894,10 @@ def _new_buffer(
          mode,
          ready_threshold=ready_threshold,
          is_realtime=streamdetails.is_realtime,
@@ -55,12 +56,12 @@ index 9894aff..e7da3ff 100644
      )
      # align chunk numbering with the actual stream start position so that
      # get_raw_stream(seek_position_ms) requests the correct chunk number
-@@ -927,14 +936,24 @@ def _buffer_pcm_format(streamdetails: StreamDetails) -> AudioFormat:
+@@ -928,14 +937,24 @@ def _buffer_pcm_format(streamdetails: StreamDetails) -> AudioFormat:
      """
      arriving = arriving_audio_format(streamdetails)
      sample_rate = preferred_pcm_sample_rate(arriving)
 +    is_dsd = is_dsd_audio_format(arriving)
-     bit_depth = arriving.bit_depth
+     bit_depth = pcm_container_bit_depth(arriving.bit_depth)
 -    if is_dsd_audio_format(arriving):
 +    content_type = ContentType.from_bit_depth(bit_depth)
 +    if is_dsd:
@@ -84,7 +85,7 @@ index 9894aff..e7da3ff 100644
          bit_depth=bit_depth,
          channels=min(arriving.channels, 8),
 diff --git a/music_assistant/helpers/ffmpeg.py b/music_assistant/helpers/ffmpeg.py
-index 5e93278..e6612fd 100644
+index 5e9327810..e6612fd0a 100644
 --- a/music_assistant/helpers/ffmpeg.py
 +++ b/music_assistant/helpers/ffmpeg.py
 @@ -106,6 +106,7 @@ class FFMpeg(AsyncProcess):
@@ -178,7 +179,7 @@ index 5e93278..e6612fd 100644
          # spreads the source at 1/sqrt(2) per channel and so costs 3 dB
          return "pan=stereo|c0=c0|c1=c0"
 diff --git a/tests/controllers/streams/test_audio_analysis_controller.py b/tests/controllers/streams/test_audio_analysis_controller.py
-index f958c2b..fe2e3ae 100644
+index f958c2b24..fe2e3ae2e 100644
 --- a/tests/controllers/streams/test_audio_analysis_controller.py
 +++ b/tests/controllers/streams/test_audio_analysis_controller.py
 @@ -215,6 +215,7 @@ async def test_multichannel_buffer_is_downmixed_for_analysis_only(
@@ -190,7 +191,7 @@ index f958c2b..fe2e3ae 100644
          assert input_format.channels == 6
          assert output_format.channels == 2
 diff --git a/tests/controllers/streams/test_audio_buffer.py b/tests/controllers/streams/test_audio_buffer.py
-index 0edaea9..6b53592 100644
+index 0edaea9e7..6b5359225 100644
 --- a/tests/controllers/streams/test_audio_buffer.py
 +++ b/tests/controllers/streams/test_audio_buffer.py
 @@ -143,8 +143,14 @@ def test_high_resolution_multichannel_buffer_is_memory_capped() -> None:
@@ -231,7 +232,7 @@ index 0edaea9..6b53592 100644
  
  @pytest.mark.asyncio
 diff --git a/tests/helpers/test_ffmpeg.py b/tests/helpers/test_ffmpeg.py
-index 9384a51..c164a9b 100644
+index 9384a5182..c164a9b82 100644
 --- a/tests/helpers/test_ffmpeg.py
 +++ b/tests/helpers/test_ffmpeg.py
 @@ -58,12 +58,35 @@ def test_get_ffmpeg_args_does_not_mutate_filters() -> None:

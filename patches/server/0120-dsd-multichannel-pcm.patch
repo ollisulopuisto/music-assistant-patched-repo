@@ -1,11 +1,10 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 Subject: [PATCH] Preserve multichannel PCM and convert DSD safely
 
 diff --git a/music_assistant/constants.py b/music_assistant/constants.py
-index 732b997..b171435 100644
+index c8868d096..d495332aa 100644
 --- a/music_assistant/constants.py
 +++ b/music_assistant/constants.py
-@@ -446,6 +446,7 @@ CONF_ENTRY_OUTPUT_CHANNELS = ConfigEntry(
+@@ -453,6 +453,7 @@ CONF_ENTRY_OUTPUT_CHANNELS = ConfigEntry(
      type=ConfigEntryType.STRING,
      options=[
          ConfigValueOption("stereo"),
@@ -14,7 +13,7 @@ index 732b997..b171435 100644
          ConfigValueOption("right"),
          ConfigValueOption("mono"),
 diff --git a/music_assistant/controllers/streams/audio.py b/music_assistant/controllers/streams/audio.py
-index c83c9a5..da5fa98 100644
+index 293ef3ed1..2aba76b09 100644
 --- a/music_assistant/controllers/streams/audio.py
 +++ b/music_assistant/controllers/streams/audio.py
 @@ -127,9 +127,11 @@ from music_assistant.helpers.audio import (
@@ -29,7 +28,7 @@ index c83c9a5..da5fa98 100644
      realtime_pcm_pacer,
      resample_pcm_audio,
      resolve_output_player_ids,
-@@ -1235,6 +1237,7 @@ class StreamsAudio:
+@@ -1238,6 +1240,7 @@ class StreamsAudio:
          content_sample_rate: int,
          content_bit_depth: int,
          media_type: MediaType = MediaType.UNKNOWN,
@@ -37,7 +36,7 @@ index c83c9a5..da5fa98 100644
      ) -> AudioFormat:
          """Parse (player specific) output format details for given format string."""
          content_type: ContentType = ContentType.try_parse(output_format_str)
-@@ -1261,11 +1264,17 @@ class StreamsAudio:
+@@ -1264,11 +1267,17 @@ class StreamsAudio:
              content_type = ContentType.from_bit_depth(output_bit_depth)
  
          output_channels_str = self._get_output_channels(player, player.player_id)
@@ -56,7 +55,7 @@ index c83c9a5..da5fa98 100644
          )
          fmt.bit_rate = get_bit_rate(fmt)
          return fmt
-@@ -1284,7 +1293,8 @@ class StreamsAudio:
+@@ -1287,7 +1296,8 @@ class StreamsAudio:
          rate the player supports that is <= the source rate, so the source is never
          upsampled. The bit depth follows the source unless audio processing
          (crossfade, volume normalization, DSP) is active — those need F32 headroom
@@ -66,7 +65,7 @@ index c83c9a5..da5fa98 100644
          Realtime AudioSource items skip all processing and get a pure passthrough
          format (source rate/bit depth when the player supports them).
  
-@@ -1296,12 +1306,13 @@ class StreamsAudio:
+@@ -1299,12 +1309,13 @@ class StreamsAudio:
          if streamdetails.media_type == MediaType.AUDIO_SOURCE:
              return self._select_audio_source_pcm_format(player, streamdetails)
          supported_sample_rates = [sr for sr, _ in player.get_supported_sample_rates()]
@@ -81,7 +80,7 @@ index c83c9a5..da5fa98 100644
              default=min(supported_sample_rates),
          )
          content_type, bit_depth = self._pick_pcm_bit_depth(
-@@ -1310,14 +1321,17 @@ class StreamsAudio:
+@@ -1313,14 +1324,17 @@ class StreamsAudio:
              crossfade_enabled,
              overlay_active,
          )
@@ -103,7 +102,7 @@ index c83c9a5..da5fa98 100644
          )
          if crossfade_enabled or overlay_active:
              pcm_format.channels = 2
-@@ -1396,7 +1410,7 @@ class StreamsAudio:
+@@ -1399,7 +1413,7 @@ class StreamsAudio:
              # sample rate; if the player doesn't natively support it, upsample to the
              # closest higher supported rate
              target_rate = (
@@ -112,7 +111,7 @@ index c83c9a5..da5fa98 100644
                  if start_streamdetails
                  else (
                      fallback_sample_rate
-@@ -1409,11 +1423,19 @@ class StreamsAudio:
+@@ -1412,11 +1426,19 @@ class StreamsAudio:
          content_type, bit_depth = self._pick_pcm_bit_depth(
              players, start_streamdetails, crossfade_enabled, overlay_active
          )
@@ -133,7 +132,7 @@ index c83c9a5..da5fa98 100644
          )
  
      async def get_audio_source_stream(
-@@ -2332,6 +2354,11 @@ class StreamsAudio:
+@@ -2335,6 +2357,11 @@ class StreamsAudio:
          flow_mode_sample_rate_conf, flow_supported_sample_rates = self._flow_restart_context(
              queue.queue_id, protocol_player
          )
@@ -145,7 +144,7 @@ index c83c9a5..da5fa98 100644
          # note: get_crossfade_mode() already falls back to standard when smart fades aren't
          # available (no analysis provider / minimal buffer), so crossfade_mode is safe to use.
          self.logger.info(
-@@ -2389,6 +2416,7 @@ class StreamsAudio:
+@@ -2392,6 +2419,7 @@ class StreamsAudio:
                      flow_supported_sample_rates,
                      flow_mode_sample_rate_conf,
                      is_first_track=queue_track is start_queue_item,
@@ -153,7 +152,7 @@ index c83c9a5..da5fa98 100644
                  ):
                      break
  
-@@ -4609,7 +4637,12 @@ class StreamsAudio:
+@@ -4616,7 +4644,12 @@ class StreamsAudio:
          # the depth the audio arrives in, not the one the source claims: a
          # provider that decoded on our behalf may advertise a narrower format
          # for display, and narrowing the stream to that would truncate it
@@ -167,7 +166,7 @@ index c83c9a5..da5fa98 100644
          return ContentType.from_bit_depth(bit_depth), bit_depth
  
      def _select_audio_source_pcm_format(
-@@ -4625,8 +4658,8 @@ class StreamsAudio:
+@@ -4632,8 +4665,8 @@ class StreamsAudio:
          channel count whenever the player can accept them; if the player does
          not support the source's sample rate, it is snapped down to the
          closest supported rate. No F32 widening — realtime sources skip every
@@ -178,7 +177,7 @@ index c83c9a5..da5fa98 100644
  
          :param player: The player requesting the stream.
          :param streamdetails: Stream details for the AudioSource item.
-@@ -4641,7 +4674,7 @@ class StreamsAudio:
+@@ -4648,7 +4681,7 @@ class StreamsAudio:
          # that decoded on our behalf may advertise a narrower format for display, and
          # narrowing the stream to that would truncate it
          source_format = arriving_audio_format(streamdetails)
@@ -187,7 +186,7 @@ index c83c9a5..da5fa98 100644
          if source_rate in resolved_sample_rates:
              output_sample_rate = source_rate
          else:
-@@ -4653,10 +4686,11 @@ class StreamsAudio:
+@@ -4660,10 +4693,11 @@ class StreamsAudio:
              content_type=ContentType.from_bit_depth(source_format.bit_depth),
              sample_rate=output_sample_rate,
              bit_depth=source_format.bit_depth,
@@ -203,7 +202,7 @@ index c83c9a5..da5fa98 100644
          )
  
      def _flow_restart_context(
-@@ -4693,6 +4727,7 @@ class StreamsAudio:
+@@ -4700,6 +4734,7 @@ class StreamsAudio:
          supported_sample_rates: list[int],
          flow_mode_sample_rate_conf: str,
          is_first_track: bool,
@@ -211,7 +210,7 @@ index c83c9a5..da5fa98 100644
      ) -> bool:
          """
          Return True if the upcoming queue track requires exiting the flow stream.
-@@ -4715,6 +4750,7 @@ class StreamsAudio:
+@@ -4722,6 +4757,7 @@ class StreamsAudio:
          :param supported_sample_rates: Sorted list of the player's supported rates.
          :param flow_mode_sample_rate_conf: The flow mode sample rate config value.
          :param is_first_track: Whether this is the first track of the flow stream.
@@ -219,7 +218,7 @@ index c83c9a5..da5fa98 100644
          """
          # live audio (radio, plugin or audio source) cannot be flowed; let the
          # queue controller fall back to single-item streaming for this item
-@@ -4730,7 +4766,22 @@ class StreamsAudio:
+@@ -4737,7 +4773,22 @@ class StreamsAudio:
  
          if is_first_track or queue_track.streamdetails is None:
              return False
@@ -244,7 +243,7 @@ index c83c9a5..da5fa98 100644
              return False
          effective_next_rate = _snap_supported_rate_up(raw_next_rate, supported_sample_rates)
 diff --git a/music_assistant/controllers/streams/audio_analysis.py b/music_assistant/controllers/streams/audio_analysis.py
-index bcd47d4..4230e48 100644
+index 8ad131b95..4a750ea15 100644
 --- a/music_assistant/controllers/streams/audio_analysis.py
 +++ b/music_assistant/controllers/streams/audio_analysis.py
 @@ -19,7 +19,7 @@ from music_assistant_models.auth import Scope
@@ -256,15 +255,15 @@ index bcd47d4..4230e48 100644
  
  from music_assistant.constants import (
      CONF_BACKGROUND_SCAN_CONCURRENCY,
-@@ -33,6 +33,7 @@ from music_assistant.constants import (
- from music_assistant.controllers.streams.audio_buffer import AudioBufferDiscarded, AudioBufferEOF
+@@ -34,6 +34,7 @@ from music_assistant.controllers.streams.audio_buffer import AudioBufferDiscarde
  from music_assistant.helpers.api import api_command
+ from music_assistant.helpers.audio import pcm_container_bit_depth
  from music_assistant.helpers.datetime import local_clock_time_to_utc, utc_timestamp
 +from music_assistant.helpers.ffmpeg import get_ffmpeg_stream
  from music_assistant.helpers.json import json_dumps, json_loads
  from music_assistant.helpers.util import inference_thread_budget, is_arm
  from music_assistant.models.audio_analysis import AudioAnalysisData
-@@ -88,7 +89,7 @@ LOGGER = logging.getLogger(f"{MASS_LOGGER_NAME}.audio_analysis")
+@@ -89,7 +90,7 @@ LOGGER = logging.getLogger(f"{MASS_LOGGER_NAME}.audio_analysis")
  if TYPE_CHECKING:
      from datetime import datetime
  
@@ -273,7 +272,7 @@ index bcd47d4..4230e48 100644
      from music_assistant_models.streamdetails import StreamDetails
  
      from music_assistant.controllers.streams.audio_buffer import AudioBuffer
-@@ -211,6 +212,18 @@ def _nice_analysis_worker() -> None:
+@@ -212,6 +213,18 @@ def _nice_analysis_worker() -> None:
          os.setpriority(os.PRIO_PROCESS, 0, ANALYSIS_THREAD_NICE)
  
  
@@ -292,7 +291,7 @@ index bcd47d4..4230e48 100644
  class AudioAnalysisController:
      """Controller that distributes PCM chunks to all registered AudioAnalysisProviders."""
  
-@@ -372,8 +385,9 @@ class AudioAnalysisController:
+@@ -373,8 +386,9 @@ class AudioAnalysisController:
              )
              return
  
@@ -303,7 +302,7 @@ index bcd47d4..4230e48 100644
          )
          if not provider_ids:
              self.logger.debug("No providers accepted analysis for %s", session_key)
-@@ -1493,13 +1507,16 @@ class AudioAnalysisController:
+@@ -1496,13 +1510,16 @@ class AudioAnalysisController:
          start_chunk = audio_buffer.first_buffered_chunk
          cursor = start_chunk
          completed = False
@@ -322,7 +321,7 @@ index bcd47d4..4230e48 100644
                  except AudioBufferDiscarded:
                      self.logger.debug(
                          "Analysis fell behind the playback buffer for %s (chunk %d evicted); "
-@@ -1507,14 +1524,44 @@ class AudioAnalysisController:
+@@ -1510,14 +1527,44 @@ class AudioAnalysisController:
                          session_key,
                          cursor,
                      )
@@ -373,7 +372,7 @@ index bcd47d4..4230e48 100644
              self._workers.pop(session_key, None)
              self._session_queues.pop(session_key, None)
 diff --git a/music_assistant/controllers/streams/audio_buffer.py b/music_assistant/controllers/streams/audio_buffer.py
-index 4586468..9894aff 100644
+index b37a05ad8..ce2fc2d0b 100644
 --- a/music_assistant/controllers/streams/audio_buffer.py
 +++ b/music_assistant/controllers/streams/audio_buffer.py
 @@ -31,6 +31,7 @@ from music_assistant.controllers.streams.constants import (
@@ -384,20 +383,21 @@ index 4586468..9894aff 100644
      RADIO_BUFFER_SIZE,
      REALTIME_COLD_START_BANK,
      REALTIME_COLD_START_MAX_REMAINING,
-@@ -39,7 +40,11 @@ from music_assistant.controllers.streams.constants import (
+@@ -39,7 +40,12 @@ from music_assistant.controllers.streams.constants import (
      BufferMode,
      BufferSize,
  )
--from music_assistant.helpers.audio import arriving_audio_format
+-from music_assistant.helpers.audio import arriving_audio_format, pcm_container_bit_depth
 +from music_assistant.helpers.audio import (
 +    arriving_audio_format,
 +    is_dsd_audio_format,
++    pcm_container_bit_depth,
 +    preferred_pcm_sample_rate,
 +)
  from music_assistant.helpers.ffmpeg import get_ffmpeg_stream
  from music_assistant.models.music_provider import MusicProvider
  
-@@ -98,9 +103,14 @@ class AudioBuffer:
+@@ -98,9 +104,14 @@ class AudioBuffer:
          """
          self.pcm_format = pcm_format
          self.is_realtime = is_realtime
@@ -413,12 +413,12 @@ index 4586468..9894aff 100644
          self.mode = mode
          self._ready_threshold = ready_threshold
          self._ready_at_chunk = ready_threshold  # updated by get_buffer to account for seek
-@@ -916,13 +926,18 @@ def _buffer_pcm_format(streamdetails: StreamDetails) -> AudioFormat:
+@@ -916,13 +927,18 @@ def _buffer_pcm_format(streamdetails: StreamDetails) -> AudioFormat:
      :param streamdetails: The stream the buffer is for.
      """
      arriving = arriving_audio_format(streamdetails)
 +    sample_rate = preferred_pcm_sample_rate(arriving)
-+    bit_depth = arriving.bit_depth
++    bit_depth = pcm_container_bit_depth(arriving.bit_depth)
 +    if is_dsd_audio_format(arriving):
 +        # DSD is stored in packed one-bit bytes; the decoded buffer is 24-bit PCM.
 +        # FFmpeg exposes DSD64 at 352.8 kHz (one sample per byte); the selected
@@ -427,7 +427,7 @@ index 4586468..9894aff 100644
      return AudioFormat(
 -        content_type=ContentType.from_bit_depth(arriving.bit_depth),
 -        sample_rate=arriving.sample_rate,
--        bit_depth=arriving.bit_depth,
+-        bit_depth=pcm_container_bit_depth(arriving.bit_depth),
 -        # buffer the stereo fold of a surround source, so audio analysis measures
 -        # the same audio that is played back rather than the untouched surround mix
 -        channels=min(arriving.channels, 2),
@@ -439,7 +439,7 @@ index 4586468..9894aff 100644
  
  
 diff --git a/music_assistant/controllers/streams/constants.py b/music_assistant/controllers/streams/constants.py
-index d913364..1ad22af 100644
+index d9133647f..1ad22af07 100644
 --- a/music_assistant/controllers/streams/constants.py
 +++ b/music_assistant/controllers/streams/constants.py
 @@ -55,6 +55,10 @@ BUFFER_SIZE_MAP: Final[dict[str, int]] = {
@@ -454,10 +454,10 @@ index d913364..1ad22af 100644
  RADIO_BUFFER_SIZE: Final[int] = 15
  
 diff --git a/music_assistant/controllers/streams/controller.py b/music_assistant/controllers/streams/controller.py
-index f6e6240..cedebe2 100644
+index 3935e186e..c5c4f6913 100644
 --- a/music_assistant/controllers/streams/controller.py
 +++ b/music_assistant/controllers/streams/controller.py
-@@ -840,6 +840,7 @@ class StreamsController(CoreController):
+@@ -841,6 +841,7 @@ class StreamsController(CoreController):
                  content_sample_rate=pcm_format.sample_rate,
                  content_bit_depth=pcm_format.bit_depth,
                  media_type=queue_item.media_type,
@@ -465,7 +465,7 @@ index f6e6240..cedebe2 100644
              )
  
              # prepare request, add some DLNA/UPNP compatible headers
-@@ -1249,6 +1250,7 @@ class StreamsController(CoreController):
+@@ -1258,6 +1259,7 @@ class StreamsController(CoreController):
              content_sample_rate=flow_pcm_format.sample_rate,
              content_bit_depth=flow_pcm_format.bit_depth,
              media_type=start_queue_item.media_type,
@@ -473,7 +473,7 @@ index f6e6240..cedebe2 100644
          )
          # work out ICY metadata support
          icy_preference = self.mass.config.get_raw_player_config_value(
-@@ -1910,6 +1912,7 @@ class StreamsController(CoreController):
+@@ -1921,6 +1923,7 @@ class StreamsController(CoreController):
              content_sample_rate=pcm_format.sample_rate,
              content_bit_depth=pcm_format.bit_depth,
              media_type=MediaType.AUDIO_SOURCE,
@@ -482,11 +482,11 @@ index f6e6240..cedebe2 100644
          resp = web.StreamResponse(
              status=200,
 diff --git a/music_assistant/helpers/audio.py b/music_assistant/helpers/audio.py
-index ce3b5e5..96824f1 100644
+index 3844ccec5..df00b6b09 100644
 --- a/music_assistant/helpers/audio.py
 +++ b/music_assistant/helpers/audio.py
-@@ -755,6 +755,25 @@ def arriving_audio_format(streamdetails: StreamDetails) -> AudioFormat:
-     return streamdetails.decoded_audio_format or streamdetails.audio_format
+@@ -764,6 +764,25 @@ def pcm_container_bit_depth(bit_depth: int) -> int:
+     return bit_depth if bit_depth in (16, 24) else 32
  
  
 +def is_dsd_audio_format(audio_format: AudioFormat) -> bool:
@@ -512,7 +512,7 @@ index ce3b5e5..96824f1 100644
      """Get the (estimated) bit rate for a given AudioFormat, if known."""
      if fmt.bit_rate:
 diff --git a/music_assistant/helpers/dsp.py b/music_assistant/helpers/dsp.py
-index fc86ed4..5cf16a8 100644
+index fc86ed41f..5cf16a89f 100644
 --- a/music_assistant/helpers/dsp.py
 +++ b/music_assistant/helpers/dsp.py
 @@ -86,7 +86,7 @@ def filter_to_ffmpeg_params(
@@ -534,10 +534,10 @@ index fc86ed4..5cf16a8 100644
              if not b.enabled:
                  continue
 diff --git a/music_assistant/helpers/ffmpeg.py b/music_assistant/helpers/ffmpeg.py
-index c32ea53..4604342 100644
+index 16015df99..5e9327810 100644
 --- a/music_assistant/helpers/ffmpeg.py
 +++ b/music_assistant/helpers/ffmpeg.py
-@@ -771,6 +771,12 @@ def _get_channel_layout_name(channels: int) -> str | None:
+@@ -778,6 +778,12 @@ def _get_channel_layout_name(channels: int) -> str | None:
          return "mono"
      if channels == 2:
          return "stereo"
@@ -551,7 +551,7 @@ index c32ea53..4604342 100644
      # and a named layout wins over -ac, so naming the wrong one would make FFmpeg misread the
      # stream as that layout. Left unnamed, it derives the default for the count itself.
 diff --git a/music_assistant/providers/filesystem_local/constants.py b/music_assistant/providers/filesystem_local/constants.py
-index 1a3b044..a04327c 100644
+index 1a3b0448a..a04327c66 100644
 --- a/music_assistant/providers/filesystem_local/constants.py
 +++ b/music_assistant/providers/filesystem_local/constants.py
 @@ -137,6 +137,7 @@ TRACK_EXTENSIONS = {
@@ -563,7 +563,7 @@ index 1a3b044..a04327c 100644
      "oga",
      "dff",
 diff --git a/music_assistant/providers/squeezelite/provider.py b/music_assistant/providers/squeezelite/provider.py
-index aef8844..fc75e1d 100644
+index aef884427..fc75e1dfb 100644
 --- a/music_assistant/providers/squeezelite/provider.py
 +++ b/music_assistant/providers/squeezelite/provider.py
 @@ -223,6 +223,7 @@ class SqueezelitePlayerProvider(PlayerProvider):
@@ -575,7 +575,7 @@ index aef8844..fc75e1d 100644
          # squeezelite takes the PCM params from the Content-Type, not from the WAV header
          resp = web.StreamResponse(
 diff --git a/music_assistant/translations/en.json b/music_assistant/translations/en.json
-index 6b8191f..820ae1b 100644
+index f67060567..2b7722e1f 100644
 --- a/music_assistant/translations/en.json
 +++ b/music_assistant/translations/en.json
 @@ -176,9 +176,10 @@
@@ -591,7 +591,7 @@ index 6b8191f..820ae1b 100644
    "common.config_entries.output_channels.options.right": "Right channel only",
    "common.config_entries.output_channels.options.stereo": "Stereo (both channels)",
 diff --git a/tests/controllers/streams/test_audio_analysis_controller.py b/tests/controllers/streams/test_audio_analysis_controller.py
-index 3028a55..f958c2b 100644
+index 3028a555c..f958c2b24 100644
 --- a/tests/controllers/streams/test_audio_analysis_controller.py
 +++ b/tests/controllers/streams/test_audio_analysis_controller.py
 @@ -4,12 +4,14 @@ from __future__ import annotations
@@ -659,7 +659,7 @@ index 3028a55..f958c2b 100644
  async def test_finalize_called_on_eof(
      controller: AudioAnalysisController,
 diff --git a/tests/controllers/streams/test_audio_buffer.py b/tests/controllers/streams/test_audio_buffer.py
-index 94a7563..0edaea9 100644
+index 94a7563be..0edaea9e7 100644
 --- a/tests/controllers/streams/test_audio_buffer.py
 +++ b/tests/controllers/streams/test_audio_buffer.py
 @@ -24,9 +24,11 @@ from music_assistant.controllers.streams.audio_buffer import (
@@ -718,11 +718,11 @@ index 94a7563..0edaea9 100644
  async def test_realtime_buffer_refuses_a_seek_past_what_it_produced() -> None:
      """
 diff --git a/tests/controllers/streams/test_buffer_pcm_format.py b/tests/controllers/streams/test_buffer_pcm_format.py
-index c26b592..399e8a4 100644
+index 38d4af7dd..386285a56 100644
 --- a/tests/controllers/streams/test_buffer_pcm_format.py
 +++ b/tests/controllers/streams/test_buffer_pcm_format.py
-@@ -74,8 +74,8 @@ def test_the_buffer_uses_the_source_when_nothing_was_decoded() -> None:
-     assert pcm.sample_rate == 48000
+@@ -95,8 +95,8 @@ def test_the_buffer_sizes_an_odd_source_depth_by_its_pcm_container() -> None:
+     assert pcm.pcm_sample_size == 352800 * 4 * 2
  
  
 -def test_a_surround_source_is_folded_to_stereo() -> None:
@@ -732,7 +732,7 @@ index c26b592..399e8a4 100644
      from music_assistant.controllers.streams.audio_buffer import (  # noqa: PLC0415
          _buffer_pcm_format,
      )
-@@ -88,7 +88,7 @@ def test_a_surround_source_is_folded_to_stereo() -> None:
+@@ -109,7 +109,7 @@ def test_a_surround_source_is_folded_to_stereo() -> None:
          channels=6,
      )
      advertised = AudioFormat(content_type=ContentType.FLAC, sample_rate=44100, bit_depth=24)
@@ -741,7 +741,7 @@ index c26b592..399e8a4 100644
  
  
  def test_the_flow_depth_follows_the_arriving_audio() -> None:
-@@ -156,9 +156,10 @@ def test_the_audio_source_passthrough_follows_the_arriving_audio() -> None:
+@@ -177,9 +177,10 @@ def test_the_audio_source_passthrough_follows_the_arriving_audio() -> None:
          channels=2,
      )
  
@@ -755,7 +755,7 @@ index c26b592..399e8a4 100644
          supported_sample_rates=(44100, 48000),
      )
 diff --git a/tests/controllers/streams/test_flow_format.py b/tests/controllers/streams/test_flow_format.py
-index 60b8f9d..15b0970 100644
+index 60b8f9de8..15b09703e 100644
 --- a/tests/controllers/streams/test_flow_format.py
 +++ b/tests/controllers/streams/test_flow_format.py
 @@ -131,6 +131,36 @@ async def test_select_flow_pcm_format_smart_anchors_on_start_track() -> None:
@@ -866,7 +866,7 @@ index 60b8f9d..15b0970 100644
 +    track.streamdetails.decoded_audio_format = None
      return track
 diff --git a/tests/helpers/test_audio.py b/tests/helpers/test_audio.py
-index 24ee751..b9e5301 100644
+index 24ee751c9..b9e530183 100644
 --- a/tests/helpers/test_audio.py
 +++ b/tests/helpers/test_audio.py
 @@ -14,13 +14,49 @@ from music_assistant_models.media_items import AudioFormat
@@ -920,7 +920,7 @@ index 24ee751..b9e5301 100644
      """Output destinations use visible protocol parents without duplicates."""
      mass = MagicMock()
 diff --git a/tests/helpers/test_dsp.py b/tests/helpers/test_dsp.py
-index 1596a94..783c55e 100644
+index 1596a94ab..783c55eb0 100644
 --- a/tests/helpers/test_dsp.py
 +++ b/tests/helpers/test_dsp.py
 @@ -197,6 +197,19 @@ def test_parametric_eq_per_channel_preamp() -> None:
@@ -944,10 +944,10 @@ index 1596a94..783c55e 100644
      """Test that an enabled peak band maps to a biquad filter with cookbook coefficients."""
      band = ParametricEQBand(
 diff --git a/tests/helpers/test_ffmpeg.py b/tests/helpers/test_ffmpeg.py
-index 13a4325..9908549 100644
+index ca28d85f1..9384a5182 100644
 --- a/tests/helpers/test_ffmpeg.py
 +++ b/tests/helpers/test_ffmpeg.py
-@@ -89,10 +89,10 @@ def _split_at_input(args: list[str]) -> tuple[list[str], list[str]]:
+@@ -150,10 +150,10 @@ def _split_at_input(args: list[str]) -> tuple[list[str], list[str]]:
  
  @pytest.mark.parametrize(
      ("channels", "expected_layout"),
@@ -961,7 +961,7 @@ index 13a4325..9908549 100644
      fmt = AudioFormat(
          content_type=ContentType.PCM_S24LE,
          sample_rate=48000,
-@@ -107,19 +107,19 @@ def test_get_ffmpeg_args_names_layout_up_to_stereo(channels: int, expected_layou
+@@ -168,19 +168,19 @@ def test_get_ffmpeg_args_names_layout_up_to_stereo(channels: int, expected_layou
          assert part[part.index("-channel_layout") + 1] == expected_layout
  
  
@@ -986,7 +986,7 @@ index 13a4325..9908549 100644
  
  
 diff --git a/tests/providers/filesystem/test_sync_config.py b/tests/providers/filesystem/test_sync_config.py
-index 3d17d4f..616a548 100644
+index 3d17d4fd7..616a5489b 100644
 --- a/tests/providers/filesystem/test_sync_config.py
 +++ b/tests/providers/filesystem/test_sync_config.py
 @@ -113,6 +113,10 @@ class TestSyncLibraryEarlyReturn:
