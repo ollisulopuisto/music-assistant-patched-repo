@@ -1,0 +1,112 @@
+From 3f8fd5992bf9174d47cec1f5919ab8a2af0f7b0d Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Fri, 23 Oct 2026 20:50:22 +0000
+Subject: [PATCH] A provider's new artwork replaces the artwork it gave before
+
+When a media server hands an album a new id (a rescanned library), the library item
+matched by name keeps the old cover id next to the new one, because images were merged
+into one list. The old id is dead, the server answers 'not found', and with it first in
+the list the album shows a blank cover at every size that is not already cached. Images
+from a provider that delivers new ones now replace that provider's older ones; other
+providers' artwork is kept.
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_016bdM1DxXcha5BLMHxDaXkJ
+---
+ music_assistant/controllers/music/helpers.py  |  7 ++
+ .../music/test_metadata_images_update.py      | 65 +++++++++++++++++++
+ 2 files changed, 72 insertions(+)
+ create mode 100644 tests/controllers/music/test_metadata_images_update.py
+
+diff --git a/music_assistant/controllers/music/helpers.py b/music_assistant/controllers/music/helpers.py
+index bde0c9428..7a9b82f08 100644
+--- a/music_assistant/controllers/music/helpers.py
++++ b/music_assistant/controllers/music/helpers.py
+@@ -138,6 +138,13 @@ def metadata_for_update(
+     """
+     if overwrite and any(getattr(update, field.name) for field in fields(update)):
+         return update
++    if update.images and stored.images:
++        # a provider's current artwork replaces what it gave before: a server that hands an
++        # album a new id (a rescanned library) leaves the old cover id dead, and keeping it
++        # first in the list shows a blank cover for as long as the old one is chosen
++        refreshed = {image.provider for image in update.images}
++        kept = [image for image in stored.images if image.provider not in refreshed]
++        stored.images = UniqueList(kept) if kept else None
+     return stored.update(update)
+ 
+ 
+diff --git a/tests/controllers/music/test_metadata_images_update.py b/tests/controllers/music/test_metadata_images_update.py
+new file mode 100644
+index 000000000..4a5358b62
+--- /dev/null
++++ b/tests/controllers/music/test_metadata_images_update.py
+@@ -0,0 +1,65 @@
++"""Tests for how a provider's fresh images are merged into a library item's metadata."""
++
++from __future__ import annotations
++
++from music_assistant_models.enums import ImageType
++from music_assistant_models.media_items import MediaItemImage, MediaItemMetadata
++
++from music_assistant.controllers.music.helpers import metadata_for_update
++
++
++def _image(path: str, provider: str, remote: bool = False) -> MediaItemImage:
++    return MediaItemImage(
++        type=ImageType.THUMB, path=path, provider=provider, remotely_accessible=remote
++    )
++
++
++def _metadata(*images: MediaItemImage) -> MediaItemMetadata:
++    metadata = MediaItemMetadata()
++    for image in images:
++        metadata.add_image(image)
++    return metadata
++
++
++def _paths(metadata: MediaItemMetadata) -> list[str]:
++    return [image.path for image in metadata.images or []]
++
++
++def test_a_providers_new_cover_replaces_its_old_one() -> None:
++    """A server that gave an album a new id leaves the old cover id dead; it must go."""
++    stored = _metadata(_image("al-old", "navidrome"))
++    update = _metadata(_image("al-new", "navidrome"))
++    assert _paths(metadata_for_update(stored, update, overwrite=False)) == ["al-new"]
++
++
++def test_other_providers_images_are_kept() -> None:
++    """Artwork another provider supplied stays, in its place before the new one."""
++    stored = _metadata(_image("al-old", "navidrome"), _image("https://x/y.jpg", "spotify", True))
++    update = _metadata(_image("al-new", "navidrome"))
++    assert _paths(metadata_for_update(stored, update, overwrite=False)) == [
++        "https://x/y.jpg",
++        "al-new",
++    ]
++
++
++def test_an_update_without_images_keeps_the_stored_ones() -> None:
++    """A bare stub of an album (no images) does not wipe the cover."""
++    stored = _metadata(_image("al-old", "navidrome"))
++    assert _paths(metadata_for_update(stored, MediaItemMetadata(), overwrite=False)) == ["al-old"]
++
++
++def test_an_update_from_another_provider_adds_to_the_images() -> None:
++    """Images from a different provider than the stored ones are added, not swapped in."""
++    stored = _metadata(_image("al-old", "navidrome"))
++    update = _metadata(_image("https://x/y.jpg", "spotify", True))
++    assert _paths(metadata_for_update(stored, update, overwrite=False)) == [
++        "al-old",
++        "https://x/y.jpg",
++    ]
++
++
++def test_an_overwrite_still_replaces_everything() -> None:
++    """The overwrite path is unchanged."""
++    stored = _metadata(_image("al-old", "navidrome"))
++    update = _metadata(_image("al-new", "navidrome"))
++    assert _paths(metadata_for_update(stored, update, overwrite=True)) == ["al-new"]
+-- 
+2.43.0
+

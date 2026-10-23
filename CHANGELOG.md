@@ -15,6 +15,8 @@ Upstream 2.10.6 (9.10.2026): `0122-preserve-dsd-stereo-downmix.patch` re-based, 
 
 Waiting for the next publish build (patches are committed, not pushed):
 
+- An album from a media server (Navidrome) showed a blank cover after the server's library was rescanned. The rescan gave the album a new id, the library item matched by name kept the old cover id next to the new one (images were merged into one list), and the dead old id came first: the server answered "not found" for every size that was not already cached (the 80 px thumbnail still showed, from the image cache). A provider's new artwork now replaces the artwork it gave before; other providers' artwork is kept (server 0125). The stored list is corrected the next time the provider's albums are synced; a queue built before the rescan keeps the old ids until it is cleared and filled again. Not tried against a live Navidrome.
+
 - Multichannel changes (0120) broke 19 upstream stream tests on 2.10.7: `arriving_audio_format` assumed every stream record has `decoded_audio_format`, and a record that is not a full `StreamDetails` raised `AttributeError` in the flow format and restart checks. It now falls back to the claimed format (server 0124). Two `test_audio_analysis` tests still fail with 0120 (they hand the analysis worker a mock buffer whose `pcm_format` cannot be compared); `test_filtergraph_complex_runs_in_ffmpeg` fails without our patches too (the local FFmpeg lacks `afir irnorm`).
 
 - Performance pass over our own patches (server 0015-0017, frontend 0011-0013); upstream code untouched:
