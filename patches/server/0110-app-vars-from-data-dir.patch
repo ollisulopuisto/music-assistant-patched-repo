@@ -16,24 +16,19 @@ This adds no home for anybody else's keys that the file did not already have;
 it only makes the existing local-file path reachable from an add-on.
 
 diff --git a/music_assistant/helpers/app_vars.py b/music_assistant/helpers/app_vars.py
-index 4c5a389..11f9317 100644
+index 4c5a389c5..f4a427bea 100644
 --- a/music_assistant/helpers/app_vars.py
 +++ b/music_assistant/helpers/app_vars.py
-@@ -66,7 +66,12 @@ APP_VAR_NAMES = (
- _DERIVATION_TAG = b"music-assistant/app-vars/v1"
+@@ -67,6 +67,8 @@ _DERIVATION_TAG = b"music-assistant/app-vars/v1"
  
  _BUNDLED_FILE = "app_secrets.json"
--_DEFAULT_LOCAL_FILE = Path.home() / ".musicassistant" / "app_vars.json"
+ _DEFAULT_LOCAL_FILE = Path.home() / ".musicassistant" / "app_vars.json"
 +# $HOME is not persisted in a container, so an add-on's data directory is checked first.
-+# Both are only consulted when the build carries no bundled secrets of its own.
-+_LOCAL_FILE_CANDIDATES = (
-+    Path("/data") / "app_vars.json",
-+    Path.home() / ".musicassistant" / "app_vars.json",
-+)
++_DATA_DIR_FILE = Path("/data") / "app_vars.json"
  
  
  def app_var(name: str) -> str:
-@@ -113,8 +118,12 @@ def _bundled_text() -> str | None:
+@@ -113,8 +115,13 @@ def _bundled_text() -> str | None:
  
  def _local_secrets() -> Mapping[str, str]:
      path = os.environ.get("MASS_APP_VARS_FILE")
@@ -41,7 +36,8 @@ index 4c5a389..11f9317 100644
 -    return _read_json_map(str(target))
 +    if path:
 +        return _read_json_map(path)
-+    for candidate in _LOCAL_FILE_CANDIDATES:
++    # Both are only consulted when the build carries no bundled secrets of its own.
++    for candidate in (_DATA_DIR_FILE, _DEFAULT_LOCAL_FILE):
 +        if found := _read_json_map(str(candidate)):
 +            return found
 +    return {}

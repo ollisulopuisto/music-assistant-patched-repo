@@ -1,22 +1,15 @@
-From 31361f84026144b44f11d49c8c453b65758da366 Mon Sep 17 00:00:00 2001
+From 41b5c2010830093d1780900cbf5bfbcac221fb7c Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
-Date: Thu, 22 Oct 2026 18:32:41 +0000
+Date: Fri, 23 Oct 2026 21:51:41 +0000
 Subject: [PATCH] Read the decoded stream format from lighter stream records
  too
 
-arriving_audio_format assumed every stream record carries decoded_audio_format. A record
-that is not a full StreamDetails (a test double, a plugin's own record) has none, and the
-multichannel changes to the flow format and restart checks then raised AttributeError
-instead of falling back to the format the stream claims.
-
-Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
-Claude-Session: https://claude.ai/code/session_016bdM1DxXcha5BLMHxDaXkJ
 ---
  music_assistant/helpers/audio.py | 5 ++++-
  1 file changed, 4 insertions(+), 1 deletion(-)
 
 diff --git a/music_assistant/helpers/audio.py b/music_assistant/helpers/audio.py
-index 96824f110..ce42658f9 100644
+index df00b6b09..f4e1c41dd 100644
 --- a/music_assistant/helpers/audio.py
 +++ b/music_assistant/helpers/audio.py
 @@ -752,7 +752,10 @@ def arriving_audio_format(streamdetails: StreamDetails) -> AudioFormat:
@@ -30,7 +23,7 @@ index 96824f110..ce42658f9 100644
 +    return decoded or streamdetails.audio_format
  
  
- def is_dsd_audio_format(audio_format: AudioFormat) -> bool:
+ def pcm_container_bit_depth(bit_depth: int) -> int:
 -- 
 2.43.0
 
