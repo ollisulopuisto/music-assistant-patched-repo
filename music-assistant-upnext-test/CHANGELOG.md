@@ -5,6 +5,93 @@ Music Assistant, rebuilt from upstream's own release with the patches in
 applied. Each entry names the upstream release it carries and the patches on top
 of it.
 
+## 2.10.8-upnext.1
+
+Built from [Music Assistant 2.10.8](https://github.com/music-assistant/server/releases/tag/2.10.8), with these patches applied:
+
+- **server** — Surface the Pocket Casts Up Next queue as a podcast
+- **server** — Stop re-asking Pocket Casts for the same account-wide status
+- **server** — Give the browse folders their episodes' show notes
+- **server** — Let a library listing start at a first letter
+- **server** — Let a layout file drop duplicate recommendation rows, hide
+- **server** — Add a paged playlist contents command
+- **server** — Let loudness analysis be disabled
+- **server** — Test the first-letter jump on the playlists listing
+- **server** — Count a playlist's items for a numbered jump strip
+- **server** — Log a long silence from the Spotify Soloist capture
+- **server** — Send the stream format and the artist image with the
+- **server** — Jump by artist or album in a playlist sorted that way
+- **server** — Close a now-playing dashboard that stays open beside idle
+- **server** — Sleep timer: stop at the end of a track, an album or a
+- **server** — Read a big playlist once per visit, not once per page
+- **server** — Sleep timer: quiet re-check while paused, read the queue only
+- **server** — Now-playing dashboard: watch the player it shows, not the
+- **server** — Install the patched frontend wheel over the pinned one
+- **server** — Look for a user-supplied app_vars.json in the add-on data directory
+- **server** — Preserve multichannel PCM and convert DSD safely
+- **server** — Recognize DFF streams as DSD for PCM buffer accounting
+- **server** — Preserve direct DSD stereo downmix gain
+- **server** — Test MPD high-resolution multichannel settings
+- **server** — Read the decoded stream format from lighter stream records
+- **server** — A provider's new artwork replaces the artwork it gave before
+- **server** — Add HVSC SID rendering provider with stereo widening
+- **server** — Build the upstream sidplayfp CLI with SIDLite for the runtime image
+- **frontend** — Refuse to render form controls from metadata markdown
+- **frontend** — Show a podcast episode's show notes where lyrics go
+- **frontend** — Add an A-Z strip to selected library listings
+- **frontend** — Page a playlist's tracks from the server, with an A-Z strip
+- **frontend** — Show the A-Z strip on the playlists listing
+- **frontend** — Numbered jump strip for long playlists in their own order
+- **frontend** — Now-playing dashboard: artist portrait, bigger artwork,
+- **frontend** — Now-playing dashboard: full-height portrait, sharp art, new
+- **frontend** — A-Z strip on a playlist sorted by artist or album
+- **frontend** — Sleep timer menu: end of track or chapter, end of album,
+- **frontend** — Now-playing dashboard: one cover request, lyrics clock only
+- **frontend** — Keep plain-text descriptions instead of re-parsing them on
+- **frontend** — Jumped list: skip layout and paint of rows off screen
+
+### Upstream release notes for 2.10.8
+
+#### 📦 Stable Release
+
+_Changes since [2.10.7](https://github.com/music-assistant/server/releases/tag/2.10.7)_
+
+##### 🐛 Bugfixes
+
+- Release sync group members when an idle group dissolves (by @smellybellyy in #7008)
+- Keep the queue position when a stopped player reports a new position (by @MarvinSchenkel in #7022)
+- Fix QueueEmpty error when ungrouping a group leader with DSP enabled (by @MarvinSchenkel in #7035)
+- Fix DSD in WavPack failing analysis due to wrong PCM size (by @MarvinSchenkel in #7041)
+- Launch the Sendspin Cast app before the stream starts (by @Simanias in #7074)
+- Limit Tidal to one concurrent stream per account (by @jozefKruszynski in #7082)
+- Only count album artists of albums in the library (by @OzGav in #7088)
+- Fix track numbers on multi-disc Tidal albums (by @OzGav in #7090)
+- Fix Genius returning lyrics of the wrong song (by @MarvinSchenkel in #7094)
+- Fix featured artists showing as album artists for Emby (by @MarvinSchenkel in #7095)
+- Fix autoplay queueing the same tracks repeatedly (by @MarvinSchenkel in #7096)
+- Keep the Spotify account when reconfiguring during a rate limit (by @MarvinSchenkel in #7098)
+- Report playlist items that could not be added (by @MarvinSchenkel in #7099)
+- Keep AirPlay receivers that share one IP on their own Universal Player (by @MarvinSchenkel in #7100)
+- Fix local files album artist fallback for album folders in the share root (by @MarvinSchenkel in #7102)
+- Bump `aiosendspin` to 10.2.1 to fix Opus stutter on ESP32 ESPHome speakers (by @maximmaxim345 in #7105)
+- Keep a provider's progress sync on its own account (by @fmunkes in #7106)
+- Pausing Spotify on the Soloist engine from the Spotify app no longer skips the track (by @MarvinSchenkel in #7117)
+- Fix ARD Audiothek account login (by @MarvinSchenkel in #7118)
+- Fix newer Google Cast speakers stopping after about 24 MiB (by @MarvinSchenkel in #7120)
+- Start a transferred queue at the source's position (by @mnestrud in #7123)
+- Fix Home Assistant plugin not recovering after a setup timeout (by @MarvinSchenkel in #7131)
+- Fix flow streams holding back FLAC audio on quiet passages (by @MarvinSchenkel in #7132)
+- Fix web players showing up in Home Assistant while not exposed (by @MarvinSchenkel in #7145)
+- Keep a WiiM seek from moving the queue to the end of the item (by @MarvinSchenkel in #7149)
+- Fix YouTube Music album links without a playlist ID (by @jetersen in #7158)
+- Fix Apple Music failing to load with an expired stored app token (by @MarvinSchenkel in #7165)
+
+#### :bow: Thanks to our contributors
+
+Special thanks to the following contributors who helped with this release:
+
+@MarvinSchenkel, @OzGav, @Simanias, @fmunkes, @jetersen, @jozefKruszynski, @maximmaxim345, @mnestrud, @smellybellyy
+
 ## 2.10.7-upnext.4
 
 Built from [Music Assistant 2.10.7](https://github.com/music-assistant/server/releases/tag/2.10.7), with these patches applied:
