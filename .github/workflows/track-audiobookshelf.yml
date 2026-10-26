@@ -39,7 +39,7 @@ jobs:
     name: Point the add-on at the newest release
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Find the newest release, and check it can actually be installed
         id: pick
