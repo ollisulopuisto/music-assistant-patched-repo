@@ -72,6 +72,11 @@ def upstream_notes(tag: str) -> str | None:
 
     :param tag: The upstream release tag.
     """
+    # Security: validate tag to prevent path traversal or SSRF in the GitHub API endpoint
+    if not re.fullmatch(r"^[a-zA-Z0-9_\.\-]+$", tag) or ".." in tag:
+        print(f"invalid upstream release tag format: {tag!r}", file=sys.stderr)
+        return None
+
     request = urllib.request.Request(
         f"https://api.github.com/repos/{SERVER_REPO}/releases/tags/{tag}",
         headers={"Accept": "application/vnd.github+json"},
