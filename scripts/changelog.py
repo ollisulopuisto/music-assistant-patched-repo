@@ -35,6 +35,9 @@ applied. Each entry names the upstream release it carries and the patches on top
 of it.
 """
 _SUBJECT_RE = re.compile(r"^Subject: \[PATCH[^\]]*\] (.+)$")
+# Maximum response size allowed when reading upstream release notes (2 MiB)
+# to protect against denial-of-service via memory exhaustion from oversized responses.
+_MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 
 
 def patch_title(path: pathlib.Path) -> str:
@@ -94,7 +97,15 @@ def upstream_notes(tag: str) -> str | None:
         request.add_header("Authorization", f"Bearer {token}")
     try:
         with urllib.request.urlopen(request, timeout=30) as response:
-            body = json.load(response).get("body") or ""
+            # Bound response reading to prevent DoS via unbounded memory allocation
+            payload = response.read(_MAX_RESPONSE_BYTES + 1)
+            if len(payload) > _MAX_RESPONSE_BYTES:
+                print(
+                    f"upstream notes for {tag} exceeded {_MAX_RESPONSE_BYTES} bytes",
+                    file=sys.stderr,
+                )
+                return None
+            body = json.loads(payload.decode("utf-8", errors="replace")).get("body") or ""
     except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as err:
         # a missing set of notes is not worth failing a build that otherwise worked
         print(f"could not read upstream notes for {tag}: {err}", file=sys.stderr)
