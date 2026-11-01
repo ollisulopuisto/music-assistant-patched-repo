@@ -34,6 +34,7 @@ Music Assistant, rebuilt from upstream's own release with the patches in
 applied. Each entry names the upstream release it carries and the patches on top
 of it.
 """
+_SUBJECT_RE = re.compile(r"^Subject: \[PATCH[^\]]*\] (.+)$")
 
 
 def patch_title(path: pathlib.Path) -> str:
@@ -42,15 +43,23 @@ def patch_title(path: pathlib.Path) -> str:
 
     :param path: The patch file to describe.
     """
-    text = path.read_text(encoding="utf-8", errors="replace")
-    # git format-patch output; the rest are hand-written diffs that open with a
-    # title line, which is the same thing without the ceremony
-    if match := re.search(r"^Subject: \[PATCH[^\]]*\] (.+)$", text, re.MULTILINE):
-        return match.group(1).strip()
-    for line in text.splitlines():
-        if line.strip():
-            return line.strip()
-    return path.stem
+    # Optimization: stream line-by-line rather than reading and regex-searching
+    # entire files (which can be >100KB). Stop as soon as the Subject header or
+    # the start of the diff contents is reached.
+    first_non_empty: str | None = None
+    with path.open("r", encoding="utf-8", errors="replace") as file:
+        for line in file:
+            stripped = line.strip()
+            if not stripped:
+                continue
+            if first_non_empty is None:
+                first_non_empty = stripped
+            if stripped.startswith("Subject:"):
+                if match := _SUBJECT_RE.match(stripped):
+                    return match.group(1).strip()
+            elif line.startswith("diff --git "):
+                break
+    return first_non_empty or path.stem
 
 
 def patch_lines(patches_dir: pathlib.Path) -> list[str]:
