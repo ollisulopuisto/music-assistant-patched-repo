@@ -75,3 +75,11 @@ def test_upstream_notes_rejects_invalid_characters():
         assert upstream_notes("tag#hash") is None
         assert upstream_notes("tag@other") is None
         mock_urlopen.assert_not_called()
+
+
+def test_upstream_notes_rejects_oversized_response():
+    with patch("urllib.request.urlopen") as mock_urlopen:
+        mock_response = mock_urlopen.return_value.__enter__.return_value
+        # Exceed 2 MiB limit
+        mock_response.read.return_value = b"x" * (2 * 1024 * 1024 + 1)
+        assert upstream_notes("2.10.9") is None
