@@ -3,7 +3,7 @@ from unittest.mock import patch
 
 import pytest
 
-from scripts.changelog import HEADER, main, patch_title, upstream_notes
+from scripts.changelog import HEADER, is_valid_ref, main, patch_title, upstream_notes
 
 
 def test_patch_title_format_patch(tmp_path):
@@ -86,6 +86,51 @@ def test_upstream_notes_rejects_oversized_response():
         # Exceed 2 MiB limit
         mock_response.read.return_value = b"x" * (2 * 1024 * 1024 + 1)
         assert upstream_notes("2.10.9") is None
+
+
+def test_is_valid_ref():
+    assert is_valid_ref("2.10.9")
+    assert is_valid_ref("2.10.9-upnext.1")
+    assert is_valid_ref("v1.0.0_beta-2")
+    assert not is_valid_ref("../escape")
+    assert not is_valid_ref("2.10.9\n## Injected")
+    assert not is_valid_ref("tag;rm -rf /")
+    assert not is_valid_ref("tag with spaces")
+    assert not is_valid_ref("")
+
+
+def test_main_rejects_invalid_version(monkeypatch):
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "changelog.py",
+            "--version",
+            "2.10.9\n## Injected",
+            "--server-ref",
+            "2.10.9",
+        ],
+    )
+    with pytest.raises(SystemExit) as exc_info:
+        main()
+    assert "invalid version format" in str(exc_info.value)
+
+
+def test_main_rejects_invalid_server_ref(monkeypatch):
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "changelog.py",
+            "--version",
+            "2.10.9-upnext.1",
+            "--server-ref",
+            "../../escape",
+        ],
+    )
+    with pytest.raises(SystemExit) as exc_info:
+        main()
+    assert "invalid server-ref format" in str(exc_info.value)
 
 
 def test_main_exits_early_when_entry_exists(tmp_path, monkeypatch):

@@ -38,6 +38,14 @@ _SUBJECT_RE = re.compile(r"^Subject: \[PATCH[^\]]*\] (.+)$")
 # Maximum response size allowed when reading upstream release notes (2 MiB)
 # to protect against denial-of-service via memory exhaustion from oversized responses.
 _MAX_RESPONSE_BYTES = 2 * 1024 * 1024
+# Security: Allowed pattern for versions and release tags/refs to prevent header injection,
+# path traversal, SSRF, or markdown structure breaking.
+_REF_PATTERN = re.compile(r"^[a-zA-Z0-9_\.\-]+$")
+
+
+def is_valid_ref(ref: str) -> bool:
+    """Check that a tag, ref, or version string contains only safe alphanumeric/punctuation characters."""
+    return bool(_REF_PATTERN.fullmatch(ref) and ".." not in ref)
 
 
 def patch_title(path: pathlib.Path) -> str:
@@ -85,7 +93,7 @@ def upstream_notes(tag: str) -> str | None:
     :param tag: The upstream release tag.
     """
     # Security: validate tag to prevent path traversal or SSRF in the GitHub API endpoint
-    if not re.fullmatch(r"^[a-zA-Z0-9_\.\-]+$", tag) or ".." in tag:
+    if not is_valid_ref(tag):
         print(f"invalid upstream release tag format: {tag!r}", file=sys.stderr)
         return None
 
@@ -156,6 +164,13 @@ def main() -> None:
         type=pathlib.Path,
     )
     args = parser.parse_args()
+
+    # Security: Validate version and server-ref arguments to prevent markdown header
+    # injection, path traversal, or SSRF in upstream release note lookups.
+    if not is_valid_ref(args.version):
+        raise SystemExit(f"invalid version format: {args.version!r}")
+    if not is_valid_ref(args.server_ref):
+        raise SystemExit(f"invalid server-ref format: {args.server_ref!r}")
 
     # Performance: Check if this version has already been recorded before
     # running expensive patch directory scans and GitHub API release note requests.
