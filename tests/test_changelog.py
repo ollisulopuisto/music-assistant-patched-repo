@@ -1,6 +1,9 @@
+import sys
 from unittest.mock import patch
 
-from scripts.changelog import patch_title, upstream_notes
+import pytest
+
+from scripts.changelog import HEADER, main, patch_title, upstream_notes
 
 
 def test_patch_title_format_patch(tmp_path):
@@ -83,3 +86,27 @@ def test_upstream_notes_rejects_oversized_response():
         # Exceed 2 MiB limit
         mock_response.read.return_value = b"x" * (2 * 1024 * 1024 + 1)
         assert upstream_notes("2.10.9") is None
+
+
+def test_main_exits_early_when_entry_exists(tmp_path, monkeypatch):
+    changelog = tmp_path / "CHANGELOG.md"
+    changelog.write_text(f"{HEADER}\n## 2.10.9-upnext.1\n\nSome notes\n")
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "changelog.py",
+            "--version",
+            "2.10.9-upnext.1",
+            "--server-ref",
+            "2.10.9",
+            "--changelog",
+            str(changelog),
+        ],
+    )
+    with patch("scripts.changelog.build_entry") as mock_build_entry:
+        with pytest.raises(SystemExit) as exc_info:
+            main()
+        assert str(changelog) in str(exc_info.value)
+        assert "already has an entry" in str(exc_info.value)
+        mock_build_entry.assert_not_called()

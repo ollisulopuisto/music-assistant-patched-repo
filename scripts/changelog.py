@@ -105,7 +105,9 @@ def upstream_notes(tag: str) -> str | None:
                     file=sys.stderr,
                 )
                 return None
-            body = json.loads(payload.decode("utf-8", errors="replace")).get("body") or ""
+            body = (
+                json.loads(payload.decode("utf-8", errors="replace")).get("body") or ""
+            )
     except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as err:
         # a missing set of notes is not worth failing a build that otherwise worked
         print(f"could not read upstream notes for {tag}: {err}", file=sys.stderr)
@@ -155,14 +157,18 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    entry = build_entry(args.version, args.server_ref, args.patches)
+    # Performance: Check if this version has already been recorded before
+    # running expensive patch directory scans and GitHub API release note requests.
     existing = ""
     if args.changelog.exists():
         existing = args.changelog.read_text(encoding="utf-8")
         existing = existing.removeprefix(HEADER).lstrip("\n")
-    if existing.startswith(f"## {args.version}\n"):
-        raise SystemExit(f"{args.changelog} already has an entry for {args.version}")
+        if existing.startswith(f"## {args.version}\n"):
+            raise SystemExit(
+                f"{args.changelog} already has an entry for {args.version}"
+            )
 
+    entry = build_entry(args.version, args.server_ref, args.patches)
     args.changelog.write_text(
         HEADER + "\n" + entry + ("\n" + existing if existing else ""), encoding="utf-8"
     )
