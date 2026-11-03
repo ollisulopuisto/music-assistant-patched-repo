@@ -43,6 +43,21 @@ _MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 _REF_PATTERN = re.compile(r"^[a-zA-Z0-9_\.\-]+$")
 
 
+class SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Strip Authorization header when redirected to a different host to prevent credential leakage."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        new_req = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if new_req and req.host.lower() != new_req.host.lower():
+            for key in list(new_req.headers.keys()):
+                if key.lower() == "authorization":
+                    del new_req.headers[key]
+            for key in list(new_req.unredirected_hdrs.keys()):
+                if key.lower() == "authorization":
+                    del new_req.unredirected_hdrs[key]
+        return new_req
+
+
 def is_valid_ref(ref: str) -> bool:
     """Check that a tag, ref, or version string contains only safe alphanumeric/punctuation characters."""
     return bool(_REF_PATTERN.fullmatch(ref) and ".." not in ref)
@@ -103,8 +118,9 @@ def upstream_notes(tag: str) -> str | None:
     )
     if token := os.environ.get("GH_TOKEN"):
         request.add_header("Authorization", f"Bearer {token}")
+    opener = urllib.request.build_opener(SafeRedirectHandler)
     try:
-        with urllib.request.urlopen(request, timeout=30) as response:
+        with opener.open(request, timeout=30) as response:
             # Bound response reading to prevent DoS via unbounded memory allocation
             payload = response.read(_MAX_RESPONSE_BYTES + 1)
             if len(payload) > _MAX_RESPONSE_BYTES:

@@ -3,7 +3,7 @@ from unittest.mock import patch
 
 import pytest
 
-from scripts.changelog import HEADER, is_valid_ref, main, patch_title, upstream_notes
+from scripts.changelog import HEADER, SafeRedirectHandler, is_valid_ref, main, patch_title, upstream_notes
 
 
 def test_patch_title_format_patch(tmp_path):
@@ -52,37 +52,64 @@ def test_patch_title_large_file_stops_early(tmp_path):
 
 
 def test_upstream_notes_valid_tag():
-    with patch("urllib.request.urlopen") as mock_urlopen:
-        mock_response = mock_urlopen.return_value.__enter__.return_value
+    with patch("urllib.request.OpenerDirector.open") as mock_open:
+        mock_response = mock_open.return_value.__enter__.return_value
         mock_response.read.return_value = b'{"body": "## Notes"}'
-        # Using json.load on response
-        with patch("json.load", return_value={"body": "## Notes"}):
-            notes = upstream_notes("2.10.9")
-            assert notes is not None
-            assert "#### Notes" in notes
+        notes = upstream_notes("2.10.9")
+        assert notes is not None
+        assert "#### Notes" in notes
+
+
+def test_safe_redirect_handler_strips_auth_on_cross_host():
+    import urllib.request
+
+    handler = SafeRedirectHandler()
+    req = urllib.request.Request("https://api.github.com/repos/test/releases")
+    req.add_header("Authorization", "Bearer secret-token")
+    # Redirect to another host
+    new_req = handler.redirect_request(
+        req, None, 302, "Found", {}, "https://external.example.com/notes"
+    )
+    assert new_req is not None
+    assert "Authorization" not in new_req.headers
+    assert "Authorization" not in new_req.unredirected_hdrs
+
+
+def test_safe_redirect_handler_preserves_auth_on_same_host():
+    import urllib.request
+
+    handler = SafeRedirectHandler()
+    req = urllib.request.Request("https://api.github.com/repos/test/releases")
+    req.add_header("Authorization", "Bearer secret-token")
+    # Redirect to same host
+    new_req = handler.redirect_request(
+        req, None, 302, "Found", {}, "https://api.github.com/repos/test/releases/page2"
+    )
+    assert new_req is not None
+    assert new_req.headers.get("Authorization") == "Bearer secret-token"
 
 
 def test_upstream_notes_rejects_path_traversal():
-    with patch("urllib.request.urlopen") as mock_urlopen:
+    with patch("urllib.request.OpenerDirector.open") as mock_open:
         assert upstream_notes("../../tags") is None
         assert upstream_notes("foo/../../bar") is None
         assert upstream_notes("..") is None
-        mock_urlopen.assert_not_called()
+        mock_open.assert_not_called()
 
 
 def test_upstream_notes_rejects_invalid_characters():
-    with patch("urllib.request.urlopen") as mock_urlopen:
+    with patch("urllib.request.OpenerDirector.open") as mock_open:
         assert upstream_notes("tag;evil") is None
         assert upstream_notes("tag with spaces") is None
         assert upstream_notes("tag?query=1") is None
         assert upstream_notes("tag#hash") is None
         assert upstream_notes("tag@other") is None
-        mock_urlopen.assert_not_called()
+        mock_open.assert_not_called()
 
 
 def test_upstream_notes_rejects_oversized_response():
-    with patch("urllib.request.urlopen") as mock_urlopen:
-        mock_response = mock_urlopen.return_value.__enter__.return_value
+    with patch("urllib.request.OpenerDirector.open") as mock_open:
+        mock_response = mock_open.return_value.__enter__.return_value
         # Exceed 2 MiB limit
         mock_response.read.return_value = b"x" * (2 * 1024 * 1024 + 1)
         assert upstream_notes("2.10.9") is None
