@@ -3,7 +3,15 @@ from unittest.mock import patch
 
 import pytest
 
-from scripts.changelog import HEADER, SafeRedirectHandler, is_valid_ref, main, patch_title, upstream_notes
+from scripts.changelog import (
+    HEADER,
+    SafeRedirectHandler,
+    has_top_entry,
+    is_valid_ref,
+    main,
+    patch_title,
+    upstream_notes,
+)
 
 
 def test_patch_title_format_patch(tmp_path):
@@ -158,6 +166,23 @@ def test_main_rejects_invalid_server_ref(monkeypatch):
     with pytest.raises(SystemExit) as exc_info:
         main()
     assert "invalid server-ref format" in str(exc_info.value)
+
+
+def test_has_top_entry_when_matching(tmp_path):
+    changelog = tmp_path / "CHANGELOG.md"
+    changelog.write_text(
+        f"{HEADER}\n## 2.10.9-upnext.1\n\nSome notes\n## 2.10.9-upnext.0\n"
+    )
+    assert has_top_entry(changelog, "2.10.9-upnext.1") is True
+    assert has_top_entry(changelog, "2.10.9-upnext.0") is False
+    assert has_top_entry(changelog, "2.10.9-upnext.2") is False
+
+
+def test_has_top_entry_nonexistent_or_empty(tmp_path):
+    changelog = tmp_path / "CHANGELOG.md"
+    assert has_top_entry(changelog, "2.10.9-upnext.1") is False
+    changelog.write_text("")
+    assert has_top_entry(changelog, "2.10.9-upnext.1") is False
 
 
 def test_main_exits_early_when_entry_exists(tmp_path, monkeypatch):

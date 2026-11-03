@@ -88,6 +88,24 @@ def patch_title(path: pathlib.Path) -> str:
     return first_non_empty or path.stem
 
 
+def has_top_entry(changelog_path: pathlib.Path, version: str) -> bool:
+    """
+    Check if the changelog already starts with an entry for version.
+
+    Optimization: stream line-by-line rather than reading and decoding the
+    entire changelog file (which can be hundreds of kilobytes) into memory.
+    """
+    if not changelog_path.exists():
+        return False
+    target = f"## {version}"
+    with changelog_path.open("r", encoding="utf-8", errors="replace") as file:
+        for line in file:
+            stripped = line.strip()
+            if stripped.startswith("## "):
+                return stripped == target
+    return False
+
+
 def patch_lines(patches_dir: pathlib.Path) -> list[str]:
     """
     Return a markdown bullet per patch, grouped by the tree it applies to.
@@ -190,16 +208,14 @@ def main() -> None:
 
     # Performance: Check if this version has already been recorded before
     # running expensive patch directory scans and GitHub API release note requests.
+    if has_top_entry(args.changelog, args.version):
+        raise SystemExit(f"{args.changelog} already has an entry for {args.version}")
+
+    entry = build_entry(args.version, args.server_ref, args.patches)
     existing = ""
     if args.changelog.exists():
         existing = args.changelog.read_text(encoding="utf-8")
         existing = existing.removeprefix(HEADER).lstrip("\n")
-        if existing.startswith(f"## {args.version}\n"):
-            raise SystemExit(
-                f"{args.changelog} already has an entry for {args.version}"
-            )
-
-    entry = build_entry(args.version, args.server_ref, args.patches)
     args.changelog.write_text(
         HEADER + "\n" + entry + ("\n" + existing if existing else ""), encoding="utf-8"
     )
