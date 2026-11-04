@@ -24,6 +24,7 @@ import pathlib
 import re
 import sys
 import urllib.error
+import urllib.parse
 import urllib.request
 
 SERVER_REPO = "music-assistant/server"
@@ -43,12 +44,23 @@ _MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 _REF_PATTERN = re.compile(r"^[a-zA-Z0-9_\.\-]+$")
 
 
+def _is_same_origin(url1: str, url2: str) -> bool:
+    """Check if two URLs share the exact same scheme, host, and port."""
+    p1, p2 = urllib.parse.urlsplit(url1), urllib.parse.urlsplit(url2)
+    s1, s2 = p1.scheme.lower(), p2.scheme.lower()
+    port1 = p1.port or (443 if s1 == "https" else 80 if s1 == "http" else None)
+    port2 = p2.port or (443 if s2 == "https" else 80 if s2 == "http" else None)
+    host1 = p1.hostname.lower() if p1.hostname else ""
+    host2 = p2.hostname.lower() if p2.hostname else ""
+    return (s1, host1, port1) == (s2, host2, port2)
+
+
 class SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
-    """Strip Authorization header when redirected to a different host to prevent credential leakage."""
+    """Strip Authorization header when redirected cross-origin or cross-scheme to prevent credential leakage."""
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         new_req = super().redirect_request(req, fp, code, msg, headers, newurl)
-        if new_req and req.host.lower() != new_req.host.lower():
+        if new_req and not _is_same_origin(req.full_url, newurl):
             for key in list(new_req.headers.keys()):
                 if key.lower() == "authorization":
                     del new_req.headers[key]
