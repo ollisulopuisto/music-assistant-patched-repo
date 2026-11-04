@@ -22,6 +22,7 @@ import json
 import os
 import pathlib
 import re
+import shutil
 import sys
 import urllib.error
 import urllib.parse
@@ -224,14 +225,37 @@ def main() -> None:
         raise SystemExit(f"{args.changelog} already has an entry for {args.version}")
 
     entry = build_entry(args.version, args.server_ref, args.patches)
-    existing = ""
-    if args.changelog.exists():
-        existing = args.changelog.read_text(encoding="utf-8")
-        existing = existing.removeprefix(HEADER).lstrip("\n")
-    args.changelog.write_text(
-        HEADER + "\n" + entry + ("\n" + existing if existing else ""), encoding="utf-8"
-    )
+    prepend_entry(args.changelog, entry)
     print(f"wrote the {args.version} entry to {args.changelog}")
+
+
+def prepend_entry(changelog_path: pathlib.Path, entry: str) -> None:
+    """
+    Prepend a new entry to the changelog file.
+
+    Optimization: Stream lines until the first entry is reached, then copy
+    the remainder in large chunks via copyfileobj instead of reading the entire
+    changelog into memory, stripping strings, and re-allocating huge text buffers.
+    """
+    if not changelog_path.exists():
+        changelog_path.write_text(HEADER + "\n" + entry, encoding="utf-8")
+        return
+
+    temp_path = changelog_path.with_suffix(".tmp")
+    try:
+        with changelog_path.open("r", encoding="utf-8", errors="replace") as src:
+            with temp_path.open("w", encoding="utf-8") as dst:
+                dst.write(HEADER + "\n" + entry)
+                for line in src:
+                    if line.startswith("## "):
+                        dst.write("\n")
+                        dst.write(line)
+                        break
+                shutil.copyfileobj(src, dst)
+        temp_path.replace(changelog_path)
+    except BaseException:
+        temp_path.unlink(missing_ok=True)
+        raise
 
 
 if __name__ == "__main__":

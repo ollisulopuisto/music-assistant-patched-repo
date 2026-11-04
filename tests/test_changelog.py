@@ -10,6 +10,7 @@ from scripts.changelog import (
     is_valid_ref,
     main,
     patch_title,
+    prepend_entry,
     upstream_notes,
 )
 
@@ -237,3 +238,28 @@ def test_main_exits_early_when_entry_exists(tmp_path, monkeypatch):
         assert str(changelog) in str(exc_info.value)
         assert "already has an entry" in str(exc_info.value)
         mock_build_entry.assert_not_called()
+
+
+def test_prepend_entry_nonexistent_file(tmp_path):
+    changelog = tmp_path / "CHANGELOG.md"
+    entry = "## 2.10.9-upnext.1\n\nFirst entry\n"
+    prepend_entry(changelog, entry)
+    assert changelog.read_text(encoding="utf-8") == f"{HEADER}\n{entry}"
+
+
+def test_prepend_entry_multiple_entries(tmp_path):
+    changelog = tmp_path / "CHANGELOG.md"
+    entry1 = "## 2.10.9-upnext.1\n\nFirst entry\n"
+    entry2 = "## 2.10.10-upnext.1\n\nSecond entry\n"
+    prepend_entry(changelog, entry1)
+    prepend_entry(changelog, entry2)
+    expected = f"{HEADER}\n{entry2}\n{entry1}"
+    assert changelog.read_text(encoding="utf-8") == expected
+
+
+def test_prepend_entry_header_only_file(tmp_path):
+    changelog = tmp_path / "CHANGELOG.md"
+    changelog.write_text(HEADER, encoding="utf-8")
+    entry = "## 2.10.9-upnext.1\n\nFirst entry\n"
+    prepend_entry(changelog, entry)
+    assert changelog.read_text(encoding="utf-8") == f"{HEADER}\n{entry}"

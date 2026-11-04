@@ -9,3 +9,7 @@ This journal records critical performance learnings, anti-patterns, and insights
 ## 2026-11-03 - Stream Line-by-Line for Top Changelog Entry Check
 **Learning:** Checking whether a published version already exists at the top of a large cumulative changelog (several thousand lines / >200KB) by reading and decoding the entire file into memory causes unnecessary heap allocations and disk I/O, especially when performing early-exit guards before remote network calls.
 **Action:** Stream the file line-by-line and inspect only until the first markdown header (`## `) is reached.
+
+## 2026-11-04 - Stream Prepending with Chunked Remainder Copying
+**Learning:** Prepending new entries to a large cumulative changelog by reading the whole file into a string, stripping the header, and concatenating strings incurs multiple multi-megabyte heap allocations and string re-encodings. Conversely, pure line-by-line looping across thousands of lines in Python adds interpreter overhead compared to chunked copying.
+**Action:** Scan line-by-line only to the first entry header (`## `) and then stream the remainder using `shutil.copyfileobj(src, dst)` to copy directly in large chunks.
