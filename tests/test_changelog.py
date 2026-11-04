@@ -89,12 +89,42 @@ def test_safe_redirect_handler_preserves_auth_on_same_host():
     handler = SafeRedirectHandler()
     req = urllib.request.Request("https://api.github.com/repos/test/releases")
     req.add_header("Authorization", "Bearer secret-token")
-    # Redirect to same host
+    # Redirect to same host and scheme
     new_req = handler.redirect_request(
         req, None, 302, "Found", {}, "https://api.github.com/repos/test/releases/page2"
     )
     assert new_req is not None
     assert new_req.headers.get("Authorization") == "Bearer secret-token"
+
+
+def test_safe_redirect_handler_strips_auth_on_scheme_downgrade():
+    import urllib.request
+
+    handler = SafeRedirectHandler()
+    req = urllib.request.Request("https://api.github.com/repos/test/releases")
+    req.add_header("Authorization", "Bearer secret-token")
+    # Downgrade from HTTPS to HTTP on same host
+    new_req = handler.redirect_request(
+        req, None, 302, "Found", {}, "http://api.github.com/repos/test/releases/page2"
+    )
+    assert new_req is not None
+    assert "Authorization" not in new_req.headers
+    assert "Authorization" not in new_req.unredirected_hdrs
+
+
+def test_safe_redirect_handler_strips_auth_on_port_change():
+    import urllib.request
+
+    handler = SafeRedirectHandler()
+    req = urllib.request.Request("https://api.github.com/repos/test/releases")
+    req.add_header("Authorization", "Bearer secret-token")
+    # Redirect to different port on same host
+    new_req = handler.redirect_request(
+        req, None, 302, "Found", {}, "https://api.github.com:8443/repos/test/releases"
+    )
+    assert new_req is not None
+    assert "Authorization" not in new_req.headers
+    assert "Authorization" not in new_req.unredirected_hdrs
 
 
 def test_upstream_notes_rejects_path_traversal():
