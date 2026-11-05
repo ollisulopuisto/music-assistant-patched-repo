@@ -49,6 +49,17 @@ def test_patch_title_empty_fallback(tmp_path):
     assert patch_title(patch_file) == "0003-empty"
 
 
+def test_patch_title_unicode_and_special_characters(tmp_path):
+    patch_file = tmp_path / "0003-unicode.patch"
+    patch_file.write_bytes(
+        b"From abc Mon Sep 17 00:00:00 2001\n"
+        b"Subject: [PATCH] Handle Caf\xc3\xa9, \xe2\x80\x94 em-dash, and \xf0\x9f\x9a\x80 emoji\n"
+        b"\n"
+        b"diff --git a/file.py b/file.py\n"
+    )
+    assert patch_title(patch_file) == "Handle Café, — em-dash, and 🚀 emoji"
+
+
 def test_patch_title_large_file_stops_early(tmp_path):
     patch_file = tmp_path / "0004-large.patch"
     # Large diff body after header

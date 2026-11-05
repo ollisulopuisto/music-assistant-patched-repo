@@ -82,21 +82,22 @@ def patch_title(path: pathlib.Path) -> str:
 
     :param path: The patch file to describe.
     """
-    # Optimization: stream line-by-line rather than reading and regex-searching
-    # entire files (which can be >100KB). Stop as soon as the Subject header or
-    # the start of the diff contents is reached.
+    # Optimization: Stream line-by-line in binary mode rather than wrapping with
+    # TextIOWrapper and decoding UTF-8 on every line. Stop as soon as the Subject
+    # header or the start of diff content is reached, decoding only the title line.
     first_non_empty: str | None = None
-    with path.open("r", encoding="utf-8", errors="replace") as file:
-        for line in file:
-            stripped = line.strip()
-            if not stripped:
+    with path.open("rb") as file:
+        for raw_line in file:
+            line_bytes = raw_line.strip()
+            if not line_bytes:
                 continue
             if first_non_empty is None:
-                first_non_empty = stripped
-            if stripped.startswith("Subject:"):
-                if match := _SUBJECT_RE.match(stripped):
+                first_non_empty = line_bytes.decode("utf-8", errors="replace")
+            if line_bytes.startswith(b"Subject:"):
+                line_str = line_bytes.decode("utf-8", errors="replace")
+                if match := _SUBJECT_RE.match(line_str):
                     return match.group(1).strip()
-            elif line.startswith("diff --git "):
+            elif raw_line.startswith(b"diff --git "):
                 break
     return first_non_empty or path.stem
 
