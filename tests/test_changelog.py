@@ -95,6 +95,23 @@ def test_safe_redirect_handler_strips_auth_on_cross_host():
     assert "Authorization" not in new_req.unredirected_hdrs
 
 
+def test_safe_redirect_handler_rejects_unsafe_schemes():
+    import urllib.request
+
+    handler = SafeRedirectHandler()
+    req = urllib.request.Request("https://api.github.com/repos/test/releases")
+    for unsafe_url in (
+        "file:///etc/passwd",
+        "file://localhost/etc/passwd",
+        "gopher://127.0.0.1:6379/_flushall",
+        "ftp://example.com/test",
+        "javascript:alert(1)",
+        "data:text/plain;base64,SGVsbG8=",
+    ):
+        new_req = handler.redirect_request(req, None, 302, "Found", {}, unsafe_url)
+        assert new_req is None, f"Expected redirect to {unsafe_url} to be blocked"
+
+
 def test_safe_redirect_handler_preserves_auth_on_same_host():
     import urllib.request
 

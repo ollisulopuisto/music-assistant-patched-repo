@@ -60,6 +60,10 @@ class SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
     """Strip Authorization header when redirected cross-origin or cross-scheme to prevent credential leakage."""
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):
+        # Security: Prevent SSRF / protocol injection via dangerous redirect schemes (e.g. file://, gopher://)
+        scheme = urllib.parse.urlsplit(newurl).scheme.lower()
+        if scheme not in ("http", "https"):
+            return None
         new_req = super().redirect_request(req, fp, code, msg, headers, newurl)
         if new_req and not _is_same_origin(req.full_url, newurl):
             for key in list(new_req.headers.keys()):
