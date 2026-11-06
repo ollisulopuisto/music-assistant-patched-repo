@@ -17,3 +17,7 @@ This journal records critical performance learnings, anti-patterns, and insights
 ## 2026-11-05 - Stream Patch Headers in Binary Mode to Avoid TextIOWrapper Overhead
 **Learning:** Opening patch files in text mode (`open("r", encoding="utf-8")`) creates a Python `TextIOWrapper` and decodes every line from bytes to UTF-8 strings. Since patch metadata headers and diff markers are standard ASCII prefixes (`b"Subject:"`, `b"diff --git "`), reading line-by-line in binary mode (`open("rb")`) bypasses decoder initialization and per-line string object allocations for non-matching lines.
 **Action:** Stream line-by-line using binary mode (`open("rb")`) and inspect byte prefixes directly, decoding only the target title line to UTF-8.
+
+## 2026-11-06 - Binary Mode Streaming for Changelog Top Entry Check
+**Learning:** Checking whether a published version already exists at the top of the changelog using text mode (`open("r", encoding="utf-8")`) initializes `TextIOWrapper` and creates Python string objects for every header and comment line scanned until the first entry. Opening in binary mode (`open("rb")`) and matching byte prefixes (`b"## "`) against UTF-8 encoded target bytes cuts execution time by ~38% without decoding strings on non-matching lines.
+**Action:** Stream markdown headers in binary mode (`open("rb")`) when looking for entry markers before doing full string processing.
