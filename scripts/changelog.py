@@ -114,17 +114,18 @@ def has_top_entry(changelog_path: pathlib.Path, version: str) -> bool:
     """
     Check if the changelog already starts with an entry for version.
 
-    Optimization: stream line-by-line rather than reading and decoding the
-    entire changelog file (which can be hundreds of kilobytes) into memory.
+    Optimization: stream line-by-line in binary mode rather than wrapping with
+    TextIOWrapper and decoding UTF-8 on every line. Inspect raw byte prefixes
+    directly until the first markdown header (b"## ") is reached.
     """
     if not changelog_path.exists():
         return False
-    target = f"## {version}"
-    with changelog_path.open("r", encoding="utf-8", errors="replace") as file:
-        for line in file:
-            stripped = line.strip()
-            if stripped.startswith("## "):
-                return stripped == target
+    target_bytes = f"## {version}".encode("utf-8")
+    with changelog_path.open("rb") as file:
+        for raw_line in file:
+            line_bytes = raw_line.strip()
+            if line_bytes.startswith(b"## "):
+                return line_bytes == target_bytes
     return False
 
 
