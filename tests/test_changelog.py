@@ -95,6 +95,26 @@ def test_safe_redirect_handler_strips_auth_on_cross_host():
     assert "Authorization" not in new_req.unredirected_hdrs
 
 
+def test_safe_redirect_handler_strips_auth_on_userinfo_url():
+    import urllib.request
+
+    handler = SafeRedirectHandler()
+    req = urllib.request.Request("https://api.github.com/repos/test/releases")
+    req.add_header("Authorization", "Bearer secret-token")
+    # Redirect to same host but containing userinfo
+    new_req = handler.redirect_request(
+        req,
+        None,
+        302,
+        "Found",
+        {},
+        "https://attacker@api.github.com/repos/test/releases",
+    )
+    assert new_req is not None
+    assert "Authorization" not in new_req.headers
+    assert "Authorization" not in new_req.unredirected_hdrs
+
+
 def test_safe_redirect_handler_rejects_unsafe_schemes():
     import urllib.request
 

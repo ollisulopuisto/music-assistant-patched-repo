@@ -46,8 +46,12 @@ _REF_PATTERN = re.compile(r"^[a-zA-Z0-9_\.\-]+$")
 
 
 def _is_same_origin(url1: str, url2: str) -> bool:
-    """Check if two URLs share the exact same scheme, host, and port."""
+    """Check if two URLs share the exact same scheme, host, and port without userinfo."""
     p1, p2 = urllib.parse.urlsplit(url1), urllib.parse.urlsplit(url2)
+    # Security: If the target URL contains explicit userinfo (username/password),
+    # treat as not same-origin to prevent credential leakage or authority confusion.
+    if p2.username is not None or p2.password is not None:
+        return False
     s1, s2 = p1.scheme.lower(), p2.scheme.lower()
     port1 = p1.port or (443 if s1 == "https" else 80 if s1 == "http" else None)
     port2 = p2.port or (443 if s2 == "https" else 80 if s2 == "http" else None)
