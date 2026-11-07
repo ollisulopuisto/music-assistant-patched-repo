@@ -95,6 +95,23 @@ def test_safe_redirect_handler_strips_auth_on_cross_host():
     assert "Authorization" not in new_req.unredirected_hdrs
 
 
+def test_safe_redirect_handler_strips_auth_on_port_zero_and_invalid_ports():
+    import urllib.request
+
+    handler = SafeRedirectHandler()
+    req = urllib.request.Request("https://api.github.com/repos/test/releases")
+    req.add_header("Authorization", "Bearer secret-token")
+    for redirect_url in (
+        "https://api.github.com:0/repos/test/releases",
+        "https://api.github.com:evil/repos/test/releases",
+        "https://api.github.com:65536/repos/test/releases",
+    ):
+        new_req = handler.redirect_request(req, None, 302, "Found", {}, redirect_url)
+        assert new_req is not None
+        assert "Authorization" not in new_req.headers
+        assert "Authorization" not in new_req.unredirected_hdrs
+
+
 def test_safe_redirect_handler_strips_auth_on_userinfo_url():
     import urllib.request
 

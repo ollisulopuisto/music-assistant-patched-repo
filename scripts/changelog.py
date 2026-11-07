@@ -45,6 +45,21 @@ _MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 _REF_PATTERN = re.compile(r"^[a-zA-Z0-9_\.\-]+$")
 
 
+def _normalized_port(parts: urllib.parse.SplitResult, scheme: str) -> int | None:
+    """Return explicit port or default port for scheme; return -1 on invalid port."""
+    try:
+        port = parts.port
+    except ValueError:
+        return -1
+    if port is not None:
+        return port
+    if scheme == "https":
+        return 443
+    if scheme == "http":
+        return 80
+    return None
+
+
 def _is_same_origin(url1: str, url2: str) -> bool:
     """Check if two URLs share the exact same scheme, host, and port without userinfo."""
     p1, p2 = urllib.parse.urlsplit(url1), urllib.parse.urlsplit(url2)
@@ -53,8 +68,8 @@ def _is_same_origin(url1: str, url2: str) -> bool:
     if p2.username is not None or p2.password is not None:
         return False
     s1, s2 = p1.scheme.lower(), p2.scheme.lower()
-    port1 = p1.port or (443 if s1 == "https" else 80 if s1 == "http" else None)
-    port2 = p2.port or (443 if s2 == "https" else 80 if s2 == "http" else None)
+    port1 = _normalized_port(p1, s1)
+    port2 = _normalized_port(p2, s2)
     host1 = p1.hostname.lower() if p1.hostname else ""
     host2 = p2.hostname.lower() if p2.hostname else ""
     return (s1, host1, port1) == (s2, host2, port2)
