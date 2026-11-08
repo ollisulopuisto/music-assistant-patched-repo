@@ -185,10 +185,18 @@ def upstream_notes(tag: str) -> str | None:
                     file=sys.stderr,
                 )
                 return None
-            body = (
-                json.loads(payload.decode("utf-8", errors="replace")).get("body") or ""
-            )
-    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as err:
+            data = json.loads(payload.decode("utf-8", errors="replace"))
+            # Security: Validate JSON payload schema to fail securely on unexpected response types
+            # (e.g. JSON arrays, primitives, non-string body) and prevent unhandled AttributeError.
+            body = data.get("body") if isinstance(data, dict) else ""
+            if not isinstance(body, str):
+                body = ""
+    except (
+        urllib.error.URLError,
+        TimeoutError,
+        json.JSONDecodeError,
+        AttributeError,
+    ) as err:
         # a missing set of notes is not worth failing a build that otherwise worked
         print(f"could not read upstream notes for {tag}: {err}", file=sys.stderr)
         return None
