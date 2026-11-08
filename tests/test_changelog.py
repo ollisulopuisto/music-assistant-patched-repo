@@ -9,6 +9,7 @@ from scripts.changelog import (
     has_top_entry,
     is_valid_ref,
     main,
+    patch_lines,
     patch_title,
     prepend_entry,
     upstream_notes,
@@ -310,6 +311,35 @@ def test_prepend_entry_nonexistent_file(tmp_path):
     entry = "## 2.10.9-upnext.1\n\nFirst entry\n"
     prepend_entry(changelog, entry)
     assert changelog.read_text(encoding="utf-8") == f"{HEADER}\n{entry}"
+
+
+def test_patch_lines_groups_and_sorts_correctly(tmp_path):
+    server_dir = tmp_path / "server"
+    frontend_dir = tmp_path / "frontend"
+    server_dir.mkdir()
+    frontend_dir.mkdir()
+
+    # Create patches with out-of-order filenames
+    (server_dir / "0002-second-server.patch").write_text(
+        "Subject: [PATCH] Second server patch\n"
+    )
+    (server_dir / "0001-first-server.patch").write_text(
+        "Subject: [PATCH] First server patch\n"
+    )
+    (frontend_dir / "0002-second-frontend.patch").write_text(
+        "Subject: [PATCH] Second frontend patch\n"
+    )
+    (frontend_dir / "0001-first-frontend.patch").write_text(
+        "Subject: [PATCH] First frontend patch\n"
+    )
+
+    lines = patch_lines(tmp_path)
+    assert lines == [
+        "- **server** — First server patch",
+        "- **server** — Second server patch",
+        "- **frontend** — First frontend patch",
+        "- **frontend** — Second frontend patch",
+    ]
 
 
 def test_prepend_entry_multiple_entries(tmp_path):
