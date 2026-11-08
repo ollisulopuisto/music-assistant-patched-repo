@@ -219,6 +219,27 @@ def test_upstream_notes_rejects_oversized_response():
         assert upstream_notes("2.10.9") is None
 
 
+@pytest.mark.parametrize(
+    "invalid_payload",
+    [
+        b"[]",
+        b"null",
+        b'"string response"',
+        b"123",
+        b"true",
+        b'{"body": 123}',
+        b'{"body": true}',
+        b'{"body": ["array"]}',
+        b'{"body": {"nested": "obj"}}',
+    ],
+)
+def test_upstream_notes_handles_unexpected_payload_schema(invalid_payload):
+    with patch("urllib.request.OpenerDirector.open") as mock_open:
+        mock_response = mock_open.return_value.__enter__.return_value
+        mock_response.read.return_value = invalid_payload
+        assert upstream_notes("2.10.9") is None
+
+
 def test_is_valid_ref():
     assert is_valid_ref("2.10.9")
     assert is_valid_ref("2.10.9-upnext.1")
