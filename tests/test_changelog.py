@@ -1,3 +1,4 @@
+import json
 import sys
 from unittest.mock import patch
 
@@ -79,6 +80,24 @@ def test_upstream_notes_valid_tag():
         notes = upstream_notes("2.10.9")
         assert notes is not None
         assert "#### Notes" in notes
+
+
+def test_upstream_notes_nests_all_header_levels():
+    body = "# H1\n\n## H2\n\n### H3\n\n#### H4\n\n##### H5\n\n###### H6"
+    with patch("urllib.request.OpenerDirector.open") as mock_open:
+        mock_response = mock_open.return_value.__enter__.return_value
+        mock_response.read.return_value = f'{{"body": {json.dumps(body)}}}'.encode(
+            "utf-8"
+        )
+        notes = upstream_notes("2.10.9")
+        assert notes is not None
+        assert "### H1" in notes
+        assert "#### H2" in notes
+        assert "##### H3" in notes
+        assert "###### H4" in notes
+        # H5 and H6 should not be nested further as markdown standard headings stop at 6
+        assert "##### H5" in notes
+        assert "###### H6" in notes
 
 
 def test_safe_redirect_handler_strips_auth_on_cross_host():
