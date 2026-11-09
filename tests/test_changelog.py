@@ -96,6 +96,27 @@ def test_safe_redirect_handler_strips_auth_on_cross_host():
     assert "Authorization" not in new_req.unredirected_hdrs
 
 
+def test_safe_redirect_handler_strips_auth_on_hostless_or_empty_host_redirect():
+    import urllib.request
+    from scripts.changelog import _is_same_origin
+
+    handler = SafeRedirectHandler()
+    req = urllib.request.Request("https://api.github.com/repos/test/releases")
+    req.add_header("Authorization", "Bearer secret-token")
+
+    # Hostless URL or empty host should not be treated as same-origin
+    assert not _is_same_origin("https://api.github.com/test", "https:///test")
+    assert not _is_same_origin("https:///test", "https:///test")
+    assert not _is_same_origin("http:///test", "http:///test")
+
+    new_req = handler.redirect_request(
+        req, None, 302, "Found", {}, "https:///evil/releases"
+    )
+    assert new_req is not None
+    assert "Authorization" not in new_req.headers
+    assert "Authorization" not in new_req.unredirected_hdrs
+
+
 def test_safe_redirect_handler_strips_auth_on_port_zero_and_invalid_ports():
     import urllib.request
 
@@ -250,6 +271,13 @@ def test_is_valid_ref():
     assert not is_valid_ref("tag;rm -rf /")
     assert not is_valid_ref("tag with spaces")
     assert not is_valid_ref("")
+    # Security: Length limit to prevent buffer / DoS issues
+    assert is_valid_ref("a" * 128)
+    assert not is_valid_ref("a" * 129)
+    # Security: Reject leading hyphens to prevent CLI option injection
+    assert not is_valid_ref("-v")
+    assert not is_valid_ref("--version")
+    assert not is_valid_ref("-")
 
 
 def test_main_rejects_invalid_version(monkeypatch):

@@ -67,11 +67,15 @@ def _is_same_origin(url1: str, url2: str) -> bool:
     # treat as not same-origin to prevent credential leakage or authority confusion.
     if p2.username is not None or p2.password is not None:
         return False
+    host1 = p1.hostname.lower() if p1.hostname else ""
+    host2 = p2.hostname.lower() if p2.hostname else ""
+    # Security: Valid web origins require a non-empty host; empty or hostless URLs
+    # must not be treated as same-origin to prevent unintended credential retention.
+    if not host1 or not host2:
+        return False
     s1, s2 = p1.scheme.lower(), p2.scheme.lower()
     port1 = _normalized_port(p1, s1)
     port2 = _normalized_port(p2, s2)
-    host1 = p1.hostname.lower() if p1.hostname else ""
-    host2 = p2.hostname.lower() if p2.hostname else ""
     return (s1, host1, port1) == (s2, host2, port2)
 
 
@@ -96,7 +100,15 @@ class SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
 
 def is_valid_ref(ref: str) -> bool:
     """Check that a tag, ref, or version string contains only safe alphanumeric/punctuation characters."""
-    return bool(_REF_PATTERN.fullmatch(ref) and ".." not in ref)
+    # Security: Enforce length bounds, reject path traversal ('..'), and reject
+    # leading hyphens to avoid CLI flag/option injection.
+    return bool(
+        ref
+        and len(ref) <= 128
+        and not ref.startswith("-")
+        and ".." not in ref
+        and _REF_PATTERN.fullmatch(ref)
+    )
 
 
 def patch_title(path: pathlib.Path) -> str:
