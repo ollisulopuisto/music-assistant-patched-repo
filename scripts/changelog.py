@@ -144,16 +144,18 @@ def has_top_entry(changelog_path: pathlib.Path, version: str) -> bool:
 
     Optimization: stream line-by-line in binary mode rather than wrapping with
     TextIOWrapper and decoding UTF-8 on every line. Inspect raw byte prefixes
-    directly until the first markdown header (b"## ") is reached.
+    directly until the first markdown header (b"## ") is reached. Avoid redundant
+    stat system calls by opening directly with try/except FileNotFoundError and
+    defer line stripping until the header prefix is found.
     """
-    if not changelog_path.exists():
-        return False
     target_bytes = f"## {version}".encode("utf-8")
-    with changelog_path.open("rb") as file:
-        for raw_line in file:
-            line_bytes = raw_line.strip()
-            if line_bytes.startswith(b"## "):
-                return line_bytes == target_bytes
+    try:
+        with changelog_path.open("rb") as file:
+            for raw_line in file:
+                if raw_line.startswith(b"## "):
+                    return raw_line.strip() == target_bytes
+    except FileNotFoundError:
+        return False
     return False
 
 
