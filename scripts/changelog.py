@@ -23,6 +23,7 @@ import os
 import pathlib
 import re
 import shutil
+import stat
 import sys
 import urllib.error
 import urllib.parse
@@ -302,9 +303,13 @@ def prepend_entry(changelog_path: pathlib.Path, entry: str) -> None:
         return
 
     temp_path = changelog_path.with_suffix(".tmp")
+    # Security: Preserve original file permissions to prevent privilege escalation or
+    # permission relaxation when replacing the target file.
+    mode = stat.S_IMODE(changelog_path.stat().st_mode)
     try:
         with changelog_path.open("rb") as src:
-            with temp_path.open("wb") as dst:
+            fd = os.open(temp_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
+            with open(fd, "wb") as dst:
                 dst.write(header_entry_bytes)
                 for raw_line in src:
                     if raw_line.startswith(b"## "):

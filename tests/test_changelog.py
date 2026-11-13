@@ -381,6 +381,26 @@ def test_prepend_entry_nonexistent_file(tmp_path):
     assert changelog.read_text(encoding="utf-8") == f"{HEADER}\n{entry}"
 
 
+def test_prepend_entry_preserves_file_permissions(tmp_path):
+    changelog = tmp_path / "CHANGELOG.md"
+    changelog.write_text(HEADER, encoding="utf-8")
+    changelog.chmod(0o600)
+    entry = "## 2.10.9-upnext.1\n\nRestricted entry\n"
+    prepend_entry(changelog, entry)
+    assert (changelog.stat().st_mode & 0o777) == 0o600
+
+
+def test_prepend_entry_cleans_up_temp_on_error(tmp_path):
+    changelog = tmp_path / "CHANGELOG.md"
+    changelog.write_text(HEADER, encoding="utf-8")
+    temp_path = changelog.with_suffix(".tmp")
+    entry = "## 2.10.9-upnext.1\n\nFaulty entry\n"
+    with patch("shutil.copyfileobj", side_effect=IOError("disk failure")):
+        with pytest.raises(IOError, match="disk failure"):
+            prepend_entry(changelog, entry)
+    assert not temp_path.exists()
+
+
 def test_patch_lines_groups_and_sorts_correctly(tmp_path):
     server_dir = tmp_path / "server"
     frontend_dir = tmp_path / "frontend"
