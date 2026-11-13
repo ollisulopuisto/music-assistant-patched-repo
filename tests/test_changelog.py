@@ -387,19 +387,21 @@ def test_patch_lines_groups_and_sorts_correctly(tmp_path):
     server_dir.mkdir()
     frontend_dir.mkdir()
 
-    # Create patches with out-of-order filenames
+    # Create patches with out-of-order filenames and non-patch files
     (server_dir / "0002-second-server.patch").write_text(
         "Subject: [PATCH] Second server patch\n"
     )
     (server_dir / "0001-first-server.patch").write_text(
         "Subject: [PATCH] First server patch\n"
     )
+    (server_dir / "notes.txt").write_text("Should be ignored\n")
     (frontend_dir / "0002-second-frontend.patch").write_text(
         "Subject: [PATCH] Second frontend patch\n"
     )
     (frontend_dir / "0001-first-frontend.patch").write_text(
         "Subject: [PATCH] First frontend patch\n"
     )
+    (frontend_dir / "README.md").write_text("Should be ignored\n")
 
     lines = patch_lines(tmp_path)
     assert lines == [
@@ -408,6 +410,17 @@ def test_patch_lines_groups_and_sorts_correctly(tmp_path):
         "- **frontend** — First frontend patch",
         "- **frontend** — Second frontend patch",
     ]
+
+
+def test_patch_lines_handles_missing_subdirectories(tmp_path):
+    # Completely nonexistent or partially existent directories
+    assert patch_lines(tmp_path / "nonexistent") == []
+
+    # Only server dir exists, frontend does not
+    server_dir = tmp_path / "server"
+    server_dir.mkdir()
+    (server_dir / "0001-patch.patch").write_text("Subject: [PATCH] Server only\n")
+    assert patch_lines(tmp_path) == ["- **server** — Server only"]
 
 
 def test_prepend_entry_multiple_entries(tmp_path):
