@@ -5,6 +5,51 @@ Music Assistant, rebuilt from upstream's own release with the patches in
 applied. Each entry names the upstream release it carries and the patches on top
 of it.
 
+## 2.10.10-upnext.1
+
+Built from [Music Assistant 2.10.10](https://github.com/music-assistant/server/releases/tag/2.10.10), with these patches applied:
+
+- **server** — Surface the Pocket Casts Up Next queue as a podcast
+- **server** — Stop re-asking Pocket Casts for the same account-wide status
+- **server** — Give the browse folders their episodes' show notes
+- **server** — Let a library listing start at a first letter
+- **server** — Let a layout file drop duplicate recommendation rows, hide
+- **server** — Add a paged playlist contents command
+- **server** — Let loudness analysis be disabled
+- **server** — Test the first-letter jump on the playlists listing
+- **server** — Count a playlist's items for a numbered jump strip
+- **server** — Log a long silence from the Spotify Soloist capture
+- **server** — Send the stream format and the artist image with the
+- **server** — Jump by artist or album in a playlist sorted that way
+- **server** — Close a now-playing dashboard that stays open beside idle
+- **server** — Sleep timer: stop at the end of a track, an album or a
+- **server** — Read a big playlist once per visit, not once per page
+- **server** — Sleep timer: quiet re-check while paused, read the queue only
+- **server** — Now-playing dashboard: watch the player it shows, not the
+- **server** — Install the patched frontend wheel over the pinned one
+- **server** — Look for a user-supplied app_vars.json in the add-on data directory
+- **server** — Preserve multichannel PCM and convert DSD safely
+- **server** — Recognize DFF streams as DSD for PCM buffer accounting
+- **server** — Preserve direct DSD stereo downmix gain
+- **server** — Test MPD high-resolution multichannel settings
+- **server** — Read the decoded stream format from lighter stream records
+- **server** — A provider's new artwork replaces the artwork it gave before
+- **server** — Add HVSC SID rendering provider with stereo widening
+- **server** — Build the upstream sidplayfp CLI with SIDLite for the runtime image
+- **frontend** — Refuse to render form controls from metadata markdown
+- **frontend** — Show a podcast episode's show notes where lyrics go
+- **frontend** — Add an A-Z strip to selected library listings
+- **frontend** — Page a playlist's tracks from the server, with an A-Z strip
+- **frontend** — Show the A-Z strip on the playlists listing
+- **frontend** — Numbered jump strip for long playlists in their own order
+- **frontend** — Now-playing dashboard: artist portrait, bigger artwork,
+- **frontend** — Now-playing dashboard: full-height portrait, sharp art, new
+- **frontend** — A-Z strip on a playlist sorted by artist or album
+- **frontend** — Sleep timer menu: end of track or chapter, end of album,
+- **frontend** — Now-playing dashboard: one cover request, lyrics clock only
+- **frontend** — Keep plain-text descriptions instead of re-parsing them on
+- **frontend** — Jumped list: skip layout and paint of rows off screen
+
 ## 2.10.9-upnext.1
 
 Built from [Music Assistant 2.10.9](https://github.com/music-assistant/server/releases/tag/2.10.9), with these patches applied:
