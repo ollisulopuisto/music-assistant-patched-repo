@@ -149,7 +149,11 @@ jobs:
           curl -fsSL \
             "https://raw.githubusercontent.com/${SERVER_REPO}/${{ needs.resolve.outputs.server_ref }}/requirements_all.txt" \
             -o requirements_all.txt
-          pinned=$(sed -n 's/^music-assistant-frontend==//p' requirements_all.txt | head -1 | tr -d '\r')
+          # upstream moved the pin from ==version to a direct wheel URL; accept both
+          pinned=$(sed -n \
+            -e 's/^music-assistant-frontend==\([^[:space:]]*\).*/\1/p' \
+            -e 's/^music-assistant-frontend @ .*releases\/download\/\([^/]*\)\/.*$/\1/p' \
+            requirements_all.txt | head -1 | tr -d '\r')
           if [ -z "$pinned" ]; then
             echo "no music-assistant-frontend pin found in the server's requirements" >&2
             exit 1
